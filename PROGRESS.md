@@ -128,9 +128,17 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
       - `v9-s-fp16`: mAP@0.5:0.95 `50.92%`, AP_small `32.59%`, Mean `102.61 ms` (P95 `117.08 ms`, `9.75 FPS`), CPU-s/100f `36.938`, Peak RSS `540.4 MB`.
       - `v9-s-int8-ppp`: mAP@0.5:0.95 `48.57%` (`-2.354 pp` -> `ROLLBACK`, triggered `--protect-heads` auto-fallback).
       - `v9-s-int8-ppp-protect-heads`: mAP@0.5:0.95 `50.70%` (`-0.223 pp`), AP_small `32.35%` (`-0.244 pp`), Mean `48.07 ms` (P95 `57.52 ms`, `+50.87%` faster, `20.80 FPS`), CPU-s/100f `14.555` (`+60.60%` reduced), Peak RSS `545.2 MB` (`100.89%`) -> **`PASS (Adopt Upgraded)`**.
-  - **Git commit hash:** `pending-phase-6-commit` (updated in Phase 7 commit)
+  - **Git commit hash:** `75d4b74` (`feat(phase-6): run real COCO val2017 OpenVINO FP16 vs INT8+PPP benchmark`)
   - **Repo-specific findings & notes:**
     - Official `v1.0-alpha/v9-t.pt` was trained with `Detection.class_conv` `class_neck=80` rather than current upstream `max(64, min(160, 128))=128`; `YOLO._maybe_adapt_head_class_neck()` aligns `class_conv` width on matched-class checkpoints so `v9-t.pt` loads all 1,776 tensors cleanly.
     - Unprotected INT8 quantization dropped mAP by `-2.82 pp` (`v9-t`) and `-2.35 pp` (`v9-s`); `--protect-heads` restored mAP within `-0.22` to `-0.28 pp` while preserving >50% P95 speedup and CPU reduction.
-- [ ] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)** (`[ ] Pending`)
-- [ ] **Phase 8: Clean Git Commits & `HANDOFF.md`** (`[ ] Pending`)
+- [x] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `tests/test_upgrade_smoke.py` (8 comprehensive pytest tests covering all 10 checklist items from license compliance & policy enforcement through YOLO->COCO, class filtering, vanilla/upgraded/-p2/partial-load, 2-step KD+multi-scale+close_mosaic, `torch-pruning`, OpenVINO FP16/INT8/PPP export & parity, `OpenVINODetector` + `SimpleByteTrack` + stream demo, and `benchmark_compare.py` Go/No-Go gates)
+  - **Verification command(s) & output:**
+    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> `8 passed, 15 warnings in 47.05s` (100% pass).
+  - **Git commit hash:** `pending-phase-7-commit` (updated in Phase 8 commit)
+  - **Repo-specific findings & notes:**
+    - Calling `GlobalHydra.instance().clear()` before `initialize(...)` and running `gc.collect()` after heavy model fixtures prevents Hydra re-init conflicts and keeps virtual memory well below Windows pagefile commit caps.
+- [~] **Phase 8: Clean Git Commits & `HANDOFF.md`** (`[~] In Progress`)
