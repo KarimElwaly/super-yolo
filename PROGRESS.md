@@ -76,12 +76,29 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
     - Native resolutions `[480,480]`, `[512,512]`, `[640,640]` compose cleanly.
     - `scripts/prune_model.py` (`v9-t-opt`, L1, `0.20`): `Params 2,660,910 -> 1,891,266 (-28.92%)`, `MACs 878,957,696 -> 645,962,624 (-26.51%)`; (`v9-t-opt-p2`, Taylor, `--strip-aux`, `0.20`): `Params 1,602,908 -> 1,062,472 (-33.72%)`, `MACs 859,185,088 -> 610,651,584 (-28.93%)`; both reload cleanly in `BaseModel` and pass forward inference.
     - `.venv\Scripts\python.exe -m pytest tests/test_tools/test_loss_functions.py -p no:cacheprovider -q` -> `1 passed in 1.45s`.
-  - **Git commit hash:** `pending-phase-3-commit` (updated in Phase 4 commit)
+  - **Git commit hash:** `6d0880e` (`feat(phase-3): add opt-in knowledge distillation, multi-scale/close-mosaic controls, and torch-pruning cli`)
   - **Repo-specific findings & notes:**
     - `yolo/utils/model_utils.py` `create_scheduler` passes 3 lambdas to `LambdaLR`, so KD projection adapters must be appended to existing `conv_params` rather than adding a 4th param group.
     - `torch-pruning` 1.6.1 hits a `_SplitOp` index mismatch across `ELAN`/`RepNCSPELAN` `chunk(2, 1)` + `cat` unless `ELAN.conv1`, `RepNCSPELAN.conv1`, `ADown`, `CBLinear`, `DConv`, and detection heads are in `ignored_layers`; protecting those boundaries still achieves ~29–34% parameter and ~27–29% MACs reduction.
     - For `--importance taylor`, `wrapper.zero_grad()` must run *after* `pruner.step()` (previously zeroing before `step()` cleared `.grad` tensors).
-- [ ] **Phase 4: OpenVINO Export, NNCF INT8, PrePostProcessor & Unified Detector** (`[ ] Pending`)
+- [x] **Phase 4: OpenVINO Export, NNCF INT8, PrePostProcessor & Unified Detector**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `scripts/export_openvino.py` (strips auxiliary PGI branches, exports opset 17 ONNX simplified with `onnxsim`, verifies 0 aux ops + PyTorch/ORT numerical parity, converts to OpenVINO FP16, supports `--int8 --calib-dir --calib-samples` via `nncf.quantize` with `--protect-heads` `IgnoredScope` targeting final 1x1 `anchor_conv.2`/`class_conv.2` + `anc2vec` + decode tail, supports `--embed-preprocess` / `--static-preprocess` via `ov.preprocess.PrePostProcessor`, writes `.meta.json` and `export_meta.json`)
+    - `inference/__init__.py`, `inference/detector_ov.py` (`OpenVINODetector` auto-reads metadata, configures CPU threads/hint, handles both embedded `uint8` PPP and manual letterbox inputs, runs class-aware OpenCV `cv2.dnn.NMSBoxes`, returns `supervision.Detections`)
+    - `inference/demo_stream_count.py` (threaded `ThreadedFrameGrabber` dropping stale frames, `OpenVINODetector`, MIT-clean `SimpleByteTrack` fallback + legacy `sv.ByteTrack`, `sv.LineZone` + `sv.PolygonZone`, `--detect-every-n`)
+  - **Verification command(s) & output:**
+    - Exports verified (`imgsz=256`):
+      - `v9-t` FP16: `ONNX nodes=758, aux_ops=0, ONNX diff(boxes=1.53e-05, scores=8.93e-09), OV diff(boxes=1.53e-05, scores=0.00e+00)`
+      - `v9-t-opt` INT8 (`--protect-heads --embed-preprocess`): `ONNX nodes=579, aux_ops=0, ONNX diff(boxes=3.05e-05, scores=2.13e-08), OV diff(boxes=3.05e-05, scores=3.42e-10)`
+      - `v9-t-opt` dynamic PPP (`--embed-preprocess`): `OV diff(boxes=3.05e-05, scores=3.42e-10)`
+      - `v9-t-opt-p2` FP16 (`class_num=5`): `ONNX nodes=738, aux_ops=0, OV diff(boxes=3.05e-05, scores=1.82e-10)`
+    - `OpenVINODetector` verified across all 4 IR models returning valid `sv.Detections`; `inference/demo_stream_count.py --detect-every-n 2` ran cleanly on synthetic `.mp4`.
+  - **Git commit hash:** `pending-phase-4-commit` (updated in Phase 5 commit)
+  - **Repo-specific findings & notes:**
+    - `supervision==0.32.3` removed `sv.ByteTrack`; `inference/demo_stream_count.py` uses `sv.ByteTrack` when available and falls back to `SimpleByteTrack` (pure NumPy + SciPy Hungarian matching, MIT/BSD-clean).
+    - `torch.onnx.export` in PyTorch 2.14 defaults to dynamo export; explicitly passing `dynamo=False` ensures opset 17 + `onnxsim.simplify` works reliably.
+    - NNCF quantization runs on the pre-PPP `f32 NCHW` OpenVINO model before fusing `ov.preprocess.PrePostProcessor` (`u8 NHWC BGR`).
 - [ ] **Phase 5: Automated A/B Benchmark Suite (`scripts/benchmark_compare.py`)** (`[ ] Pending`)
 - [ ] **Phase 6: Automated Real Baseline Benchmark on COCO `val2017`** (`[ ] Pending`)
 - [ ] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)** (`[ ] Pending`)
