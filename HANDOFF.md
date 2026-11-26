@@ -31,16 +31,16 @@ Isolated Environment: `.venv` (Python 3.11.9, MIT/Apache-2.0/BSD-clean)
 - [inference/detector_ov.py](inference/detector_ov.py), [inference/__init__.py](inference/__init__.py) — `OpenVINODetector` supporting both manual letterbox and embedded `uint8` `NHWC` BGR models, OpenCV `cv2.dnn.NMSBoxes`, and `supervision.Detections` output.
 - [inference/demo_stream_count.py](inference/demo_stream_count.py) — Threaded RTSP/video frame grabber + `OpenVINODetector` + MIT-clean `SimpleByteTrack` fallback + `sv.LineZone` / `sv.PolygonZone` + `--detect-every-n`.
 - [scripts/benchmark_compare.py](scripts/benchmark_compare.py) — Isolated worker A/B benchmark suite (`pycocotools` mAP, latency Mean/P50/P95/FPS, `psutil` CPU % & CPU-seconds/100f, Peak RSS, disk size, and `PASS (Adopt Upgraded)` / `ROLLBACK (Keep Vanilla)` gate).
-- [tests/test_upgrade_smoke.py](tests/test_upgrade_smoke.py) — End-to-end smoke test suite covering all 10 verification criteria.
+- [tests/test_upgrade_smoke.py](tests/test_upgrade_smoke.py) — End-to-end smoke test suite covering all 10 verification criteria (14 parametrized test cases across 8 test functions, including license policy enforcement, `YoloDataset` load, partial & pruned `BaseModel` reloads, `SimpleByteTrack` + `run_stream_pipeline`, and Go/No-Go gates).
 - [.gitignore](.gitignore), [PROGRESS.md](PROGRESS.md) — Excludes `.venv/`, `data/`, `weights/`, `exports/`, `tmp/`, `runs/`, and checkpoints; tracks phase-by-phase progress and commit hashes.
 
 ---
 
 ## 2. Verification Results
 
-- **License Audit:** `.venv\Scripts\python.exe scripts/check_licenses.py` -> exited `0` (`Scanned 107 installed packages. PASSED: All 107 packages are compliant (0 GPL/AGPL, 0 banned packages).`).
-- **End-to-End Smoke Suite:** `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> **`8 passed` in `47.05s`** (100% pass).
-- **Upstream Baseline Unit Tests:** `tests/test_model` + `tests/test_utils/test_module_utils.py` (`26 passed`) and `tests/test_utils/test_bounding_box_utils.py` (`13 passed`), plus `tests/test_tools/test_loss_functions.py` (`1 passed`).
+- **License Audit:** `.venv\Scripts\python.exe scripts/check_licenses.py` -> exited `0` (`Scanned 109 installed packages. PASSED: All 109 packages are compliant (0 GPL/AGPL, 0 banned packages).`).
+- **End-to-End Smoke Suite:** `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> **`14 passed`** (8 test functions / 14 parametrized cases, 0 failed).
+- **Upstream Baseline Unit Tests:** `.venv\Scripts\python.exe -m pytest tests/test_model tests/test_utils tests/test_tools/test_data_augmentation.py tests/test_tools/test_loss_functions.py -v -p no:cacheprovider` -> **`43 passed`** (0 failed).
 
 ---
 

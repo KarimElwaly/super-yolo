@@ -135,12 +135,13 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
 - [x] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)**
   - **Status:** `[x] Done`
   - **Key files created/modified:**
-    - `tests/test_upgrade_smoke.py` (8 comprehensive pytest tests covering all 10 checklist items from license compliance & policy enforcement through YOLO->COCO, class filtering, vanilla/upgraded/-p2/partial-load, 2-step KD+multi-scale+close_mosaic, `torch-pruning`, OpenVINO FP16/INT8/PPP export & parity, `OpenVINODetector` + `SimpleByteTrack` + stream demo, and `benchmark_compare.py` Go/No-Go gates)
+    - `tests/test_upgrade_smoke.py` (8 test functions / 14 parametrized pytest cases covering all 10 checklist items: license compliance & fake `ultralytics`/`GPL` policy enforcement, YOLO->COCO + `YoloDataset` load, COCO class filtering, vanilla `v9-t`/`v9-s`/`v9-m` non-regression, all 5 upgraded `-opt`/`-p2` configs + `BaseModel` partial-load + `strip_auxiliary_branches()`, 2-step KD+multi-scale+`close_mosaic`, `torch-pruning` + `BaseModel` pruned reload, OpenVINO FP16/INT8/PPP export & parity, `OpenVINODetector` + `SimpleByteTrack` + `run_stream_pipeline` MP4 stream, and `benchmark_compare.py` Go/No-Go gates)
   - **Verification command(s) & output:**
-    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> `8 passed, 15 warnings in 47.05s` (100% pass).
-  - **Git commit hash:** `bb8753c` (`test(phase-7): add end-to-end upgrade smoke test suite`)
+    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> `14 passed` (100% pass, 0 failed).
+    - `.venv\Scripts\python.exe -m pytest tests/test_model tests/test_utils tests/test_tools/test_data_augmentation.py tests/test_tools/test_loss_functions.py -v -p no:cacheprovider` -> `43 passed` (100% pass, 0 failed).
+  - **Git commit hash:** `bb8753c` (`test(phase-7): add end-to-end upgrade smoke test suite`, refined to 14 parametrized cases in follow-up commit)
   - **Repo-specific findings & notes:**
-    - Calling `GlobalHydra.instance().clear()` before `initialize(...)` and running `gc.collect()` after heavy model fixtures prevents Hydra re-init conflicts and keeps virtual memory well below Windows pagefile commit caps.
+    - Using scoped `with initialize(...)` and `_cleanup()` (`gc.collect()` + `torch.cuda.empty_cache()`) prevents Hydra re-init conflicts and keeps virtual memory well below Windows pagefile commit caps.
 - [x] **Phase 8: Clean Git Commits & `HANDOFF.md`**
   - **Status:** `[x] Done`
   - **Key files created/modified:**
@@ -148,9 +149,9 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
     - `HANDOFF.md` (added full architecture/tool summary, test verification, real COCO `val2017` OpenVINO benchmark table with weight provenance/MIT license notes, copy-pasteable `.venv` CLI workflow commands, and 1-command rollback instructions)
     - `PROGRESS.md` (finalized across Step 0 through Phase 8)
   - **Verification command(s) & output:**
-    - `.venv\Scripts\python.exe scripts/check_licenses.py` -> exit `0` (`107` packages, `0 GPL/AGPL, 0 banned packages`).
-    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> `8 passed` (100% pass).
+    - `.venv\Scripts\python.exe scripts/check_licenses.py` -> exit `0` (`109` packages, `0 GPL/AGPL, 0 banned packages`).
+    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -v -p no:cacheprovider` -> `14 passed` (100% pass).
     - `git status` -> clean working tree on `feat/yolov9-cpu-upgrade` (only pre-existing untracked `IMPLEMENTATION_PLAN.md`; `.venv/`, `data/`, `weights/`, `exports/` ignored).
-  - **Git commit hash:** `eace1d2` (`docs(phase-8): add HANDOFF.md with benchmark summary and workflow commands`, followed by `PROGRESS.md` finalization commit)
+  - **Git commit hash:** `eace1d2` & `16ed1ba` (followed by final verification & sync commit)
   - **Repo-specific findings & notes:**
     - All deliverables verified end-to-end on branch `feat/yolov9-cpu-upgrade` with zero modifications to vanilla `v9-t.yaml`, `v9-s.yaml`, or `v9-m.yaml`.
