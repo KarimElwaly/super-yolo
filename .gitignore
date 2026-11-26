@@ -83,6 +83,7 @@ target/
 # Environment variables
 .env
 .venv
+.venv/
 env/
 venv/
 ENV/
@@ -112,9 +113,14 @@ dmypy.json
 
 # Machine learning specific folders and symlinks
 runs
+runs/
 /data
+data/
 /datasets
 */data
+weights/
+exports/
+tmp/
 
 # Datasets and model checkpoints
 *.ckpt
@@ -122,6 +128,9 @@ runs
 *.pt
 *.trt
 *.onnx
+*.xml
+*.bin
+*.pache
 
 # Image files
 *.png
