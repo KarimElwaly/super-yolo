@@ -259,6 +259,8 @@ def run_stream_pipeline(
     display: bool = False,
     drop_stale: bool = True,
     target_classes: Optional[List[str]] = None,
+    show_zones: bool = True,
+    use_tracker: bool = True,
 ) -> Dict[str, Any]:
     detector = OpenVINODetector(
         model_xml_path=model_xml,
@@ -268,7 +270,7 @@ def run_stream_pipeline(
         iou_threshold=iou_threshold,
     )
     allowed_ids = _resolve_class_filter(target_classes, detector.class_names)
-    tracker = create_tracker(conf_threshold=conf_threshold)
+    tracker = create_tracker(conf_threshold=conf_threshold) if use_tracker else None
 
     grabber = ThreadedFrameGrabber(source, drop_stale=drop_stale)
     ok, first_frame = grabber.read(timeout_s=5.0)
@@ -277,17 +279,17 @@ def run_stream_pipeline(
         raise RuntimeError(f"No frames received from source: {source}")
 
     h, w = first_frame.shape[:2]
-    line_zone = sv.LineZone(start=sv.Point(0, h // 2), end=sv.Point(w, h // 2))
+    line_zone = sv.LineZone(start=sv.Point(0, h // 2), end=sv.Point(w, h // 2)) if show_zones else None
     polygon = np.array(
         [[int(w * 0.2), int(h * 0.2)], [int(w * 0.8), int(h * 0.2)], [int(w * 0.8), int(h * 0.8)], [int(w * 0.2), int(h * 0.8)]],
         dtype=np.int64,
     )
-    poly_zone = sv.PolygonZone(polygon=polygon)
+    poly_zone = sv.PolygonZone(polygon=polygon) if show_zones else None
 
     box_annotator = sv.BoxAnnotator()
     label_annotator = sv.LabelAnnotator()
-    line_annotator = sv.LineZoneAnnotator()
-    poly_annotator = sv.PolygonZoneAnnotator(zone=poly_zone)
+    line_annotator = sv.LineZoneAnnotator() if show_zones else None
+    poly_annotator = sv.PolygonZoneAnnotator(zone=poly_zone) if poly_zone is not None else None
 
     writer = None
     if output_video is not None:
@@ -308,17 +310,22 @@ def run_stream_pipeline(
                 if allowed_ids is not None and len(raw_dets) > 0 and raw_dets.class_id is not None:
                     keep = np.isin(raw_dets.class_id, sorted(allowed_ids))
                     raw_dets = raw_dets[keep]
-                last_detections = tracker.update_with_detections(raw_dets)
+                last_detections = tracker.update_with_detections(raw_dets) if tracker is not None else raw_dets
                 total_detections += len(raw_dets)
                 if last_detections.tracker_id is not None:
                     unique_track_ids.update(int(t) for t in last_detections.tracker_id.tolist())
 
-            line_zone.trigger(last_detections)
-            poly_zone.trigger(last_detections)
+            if line_zone is not None:
+                line_zone.trigger(last_detections)
+            if poly_zone is not None:
+                poly_zone.trigger(last_detections)
 
             annotated = box_annotator.annotate(scene=frame.copy(), detections=last_detections)
             labels = [
-                f"#{tid} {detector.class_names[int(cid)] if 0 <= int(cid) < len(detector.class_names) else f'cls:{cid}'} {conf:.2f}"
+                (
+                    f"#{tid} " if tracker is not None and tid != -1 else ""
+                )
+                + f"{detector.class_names[int(cid)] if 0 <= int(cid) < len(detector.class_names) else f'cls:{cid}'} {conf:.2f}"
                 for tid, cid, conf in zip(
                     last_detections.tracker_id if last_detections.tracker_id is not None else [-1] * len(last_detections),
                     last_detections.class_id if last_detections.class_id is not None else [0] * len(last_detections),
@@ -327,8 +334,10 @@ def run_stream_pipeline(
             ]
             if len(last_detections) > 0:
                 annotated = label_annotator.annotate(scene=annotated, detections=last_detections, labels=labels)
-            annotated = line_annotator.annotate(frame=annotated, line_counter=line_zone)
-            annotated = poly_annotator.annotate(scene=annotated)
+            if line_annotator is not None and line_zone is not None:
+                annotated = line_annotator.annotate(frame=annotated, line_counter=line_zone)
+            if poly_annotator is not None:
+                annotated = poly_annotator.annotate(scene=annotated)
 
             if writer is not None:
                 writer.write(annotated)
@@ -356,9 +365,9 @@ def run_stream_pipeline(
         "fps": round(frame_idx / elapsed, 2),
         "total_detections": int(total_detections),
         "unique_track_ids": len(unique_track_ids),
-        "line_in_count": int(line_zone.in_count),
-        "line_out_count": int(line_zone.out_count),
-        "polygon_current_count": int(poly_zone.current_count),
+        "line_in_count": int(line_zone.in_count) if line_zone is not None else 0,
+        "line_out_count": int(line_zone.out_count) if line_zone is not None else 0,
+        "polygon_current_count": int(poly_zone.current_count) if poly_zone is not None else 0,
     }
 
 
@@ -375,6 +384,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--output", type=Path, default=None, help="Optional output annotated MP4 path.")
     parser.add_argument("--display", action="store_true", help="Display live OpenCV window.")
     parser.add_argument("--no-drop-frames", action="store_true", help="Process every frame sequentially instead of dropping stale frames.")
+    parser.add_argument("--no-zones", action="store_true", help="Disable LineZone (in/out line) and PolygonZone overlays.")
+    parser.add_argument("--no-track", action="store_true", help="Disable ByteTrack ID tracking and render raw detections directly.")
     args = parser.parse_args(argv)
 
     summary = run_stream_pipeline(
@@ -389,6 +400,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         display=args.display,
         drop_stale=not args.no_drop_frames,
         target_classes=args.classes,
+        show_zones=not args.no_zones,
+        use_tracker=not args.no_track,
     )
     print(f"[OK] Stream summary: {summary}")
     return 0
