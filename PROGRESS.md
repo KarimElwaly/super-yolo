@@ -94,12 +94,24 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
       - `v9-t-opt` dynamic PPP (`--embed-preprocess`): `OV diff(boxes=3.05e-05, scores=3.42e-10)`
       - `v9-t-opt-p2` FP16 (`class_num=5`): `ONNX nodes=738, aux_ops=0, OV diff(boxes=3.05e-05, scores=1.82e-10)`
     - `OpenVINODetector` verified across all 4 IR models returning valid `sv.Detections`; `inference/demo_stream_count.py --detect-every-n 2` ran cleanly on synthetic `.mp4`.
-  - **Git commit hash:** `pending-phase-4-commit` (updated in Phase 5 commit)
+  - **Git commit hash:** `9e9a093` (`feat(phase-4): add OpenVINO exporter, NNCF INT8, PrePostProcessor, detector, and stream demo`)
   - **Repo-specific findings & notes:**
     - `supervision==0.32.3` removed `sv.ByteTrack`; `inference/demo_stream_count.py` uses `sv.ByteTrack` when available and falls back to `SimpleByteTrack` (pure NumPy + SciPy Hungarian matching, MIT/BSD-clean).
     - `torch.onnx.export` in PyTorch 2.14 defaults to dynamo export; explicitly passing `dynamo=False` ensures opset 17 + `onnxsim.simplify` works reliably.
     - NNCF quantization runs on the pre-PPP `f32 NCHW` OpenVINO model before fusing `ov.preprocess.PrePostProcessor` (`u8 NHWC BGR`).
-- [ ] **Phase 5: Automated A/B Benchmark Suite (`scripts/benchmark_compare.py`)** (`[ ] Pending`)
+- [x] **Phase 5: Automated A/B Benchmark Suite (`scripts/benchmark_compare.py`)**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `scripts/benchmark_compare.py` (JSON/YAML manifest runner with locked `INFERENCE_NUM_THREADS`, `PERFORMANCE_HINT`, warmup/timed iterations; isolated child worker subprocess per model for clean Peak RSS & CPU timing; `pycocotools` COCO accuracy with dynamic sorted `category_id` mapping and `imgIds` scoping; automated `PASS (Adopt Upgraded)` / `ROLLBACK (Keep Vanilla)` gate; Markdown & JSON report writers)
+  - **Verification command(s) & output:**
+    - Synthetic A/B run (`v9-t` FP16 vs `v9-t-opt` INT8 + `--protect-heads` + `--embed-preprocess`, `imgsz=256`, `warmup=5`, `iters=20`, `max_eval_images=4`):
+      - `v9-t_fp16`: Mean `8.95 ms`, P50 `8.44 ms`, P95 `11.18 ms`, `111.74 FPS`, CPU-s/100f `2.9688`, Peak RSS `180.8 MB`, Disk `4.29 MB`.
+      - `v9-t-opt_int8_ppp`: Mean `4.98 ms`, P50 `4.91 ms`, P95 `5.54 ms` (`+50.44%` speedup), `200.88 FPS`, CPU-s/100f `2.1094` (`+28.95%` reduction), Peak RSS `208.2 MB` (`115.15%`), Disk `3.39 MB` (`-20.88%`).
+      - Gate PASS & ROLLBACK unit assertions passed.
+  - **Git commit hash:** `pending-phase-5-commit` (updated in Phase 6 commit)
+  - **Repo-specific findings & notes:**
+    - Benchmarking each model in an isolated child worker (`--worker-json`) is essential on Windows so monotonic `peak_wset` RSS from the baseline model does not contaminate the candidate's Peak RSS measurement.
+    - For COCO mAP with `--max-eval-images <N>`, setting `coco_eval.params.imgIds = evaluated_ids` prevents `pycocotools` from normalizing recall over un-evaluated dataset images.
 - [ ] **Phase 6: Automated Real Baseline Benchmark on COCO `val2017`** (`[ ] Pending`)
 - [ ] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)** (`[ ] Pending`)
 - [ ] **Phase 8: Clean Git Commits & `HANDOFF.md`** (`[ ] Pending`)
