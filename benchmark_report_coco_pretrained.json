@@ -1,0 +1,272 @@
+{
+  "baseline": "v9-t-fp16",
+  "controls": {
+    "threads": 4,
+    "performance_hint": "LATENCY",
+    "warmup": 30,
+    "iters": 200,
+    "max_eval_images": 500,
+    "bench_conf": 0.25,
+    "bench_iou": 0.45,
+    "eval_conf": 0.001,
+    "eval_iou": 0.65
+  },
+  "results": [
+    {
+      "name": "v9-t-fp16",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9t_fp16\\v9t_fp16.xml",
+      "precision": "FP16",
+      "model_variant": "v9-t",
+      "embedded_preprocess": false,
+      "letterbox_embedded": false,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 57.341,
+      "latency_p50_ms": 57.452,
+      "latency_p95_ms": 68.992,
+      "fps": 17.44,
+      "avg_cpu_pct": 254.48,
+      "cpu_sec_per_100_frames": 14.5938,
+      "peak_rss_mb": 533.85,
+      "disk_size_mb": 4.92,
+      "evaluated_images": 500,
+      "detections": 82263,
+      "map_50_95": 41.39,
+      "map_50": 56.129,
+      "ap_small": 22.924,
+      "ap_medium": 46.159,
+      "ap_large": 57.25,
+      "compare_to": null
+    },
+    {
+      "name": "v9-t-int8-ppp",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9t_int8_ppp\\v9t_int8_ppp.xml",
+      "precision": "INT8",
+      "model_variant": "v9-t",
+      "embedded_preprocess": true,
+      "letterbox_embedded": true,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 19.768,
+      "latency_p50_ms": 19.634,
+      "latency_p95_ms": 21.368,
+      "fps": 50.59,
+      "avg_cpu_pct": 338.24,
+      "cpu_sec_per_100_frames": 6.6875,
+      "peak_rss_mb": 537.89,
+      "disk_size_mb": 3.86,
+      "evaluated_images": 500,
+      "detections": 71760,
+      "map_50_95": 38.567,
+      "map_50": 53.577,
+      "ap_small": 20.378,
+      "ap_medium": 39.969,
+      "ap_large": 56.034,
+      "compare_to": "v9-t-fp16"
+    },
+    {
+      "name": "v9-t-int8-ppp-protect-heads",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9t_int8_ppp_prot\\v9t_int8_ppp_prot.xml",
+      "precision": "INT8",
+      "model_variant": "v9-t",
+      "embedded_preprocess": true,
+      "letterbox_embedded": true,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 26.697,
+      "latency_p50_ms": 26.945,
+      "latency_p95_ms": 33.837,
+      "fps": 37.46,
+      "avg_cpu_pct": 271.21,
+      "cpu_sec_per_100_frames": 7.2422,
+      "peak_rss_mb": 559.91,
+      "disk_size_mb": 3.89,
+      "evaluated_images": 500,
+      "detections": 82196,
+      "map_50_95": 41.106,
+      "map_50": 56.086,
+      "ap_small": 21.991,
+      "ap_medium": 44.777,
+      "ap_large": 57.178,
+      "compare_to": "v9-t-fp16"
+    },
+    {
+      "name": "v9-s-fp16",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9s_fp16\\v9s_fp16.xml",
+      "precision": "FP16",
+      "model_variant": "v9-s",
+      "embedded_preprocess": false,
+      "letterbox_embedded": false,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 102.61,
+      "latency_p50_ms": 100.339,
+      "latency_p95_ms": 117.08,
+      "fps": 9.75,
+      "avg_cpu_pct": 359.97,
+      "cpu_sec_per_100_frames": 36.9375,
+      "peak_rss_mb": 540.38,
+      "disk_size_mb": 14.81,
+      "evaluated_images": 500,
+      "detections": 63692,
+      "map_50_95": 50.924,
+      "map_50": 67.238,
+      "ap_small": 32.593,
+      "ap_medium": 56.753,
+      "ap_large": 65.996,
+      "compare_to": null
+    },
+    {
+      "name": "v9-s-int8-ppp",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9s_int8_ppp\\v9s_int8_ppp.xml",
+      "precision": "INT8",
+      "model_variant": "v9-s",
+      "embedded_preprocess": true,
+      "letterbox_embedded": true,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 41.443,
+      "latency_p50_ms": 38.502,
+      "latency_p95_ms": 54.295,
+      "fps": 24.13,
+      "avg_cpu_pct": 346.83,
+      "cpu_sec_per_100_frames": 14.375,
+      "peak_rss_mb": 553.06,
+      "disk_size_mb": 8.85,
+      "evaluated_images": 500,
+      "detections": 69696,
+      "map_50_95": 48.57,
+      "map_50": 65.819,
+      "ap_small": 30.428,
+      "ap_medium": 51.722,
+      "ap_large": 64.422,
+      "compare_to": "v9-s-fp16"
+    },
+    {
+      "name": "v9-s-int8-ppp-protect-heads",
+      "model_xml": "D:\\projects\\YOLO\\exports\\coco_bench\\v9s_int8_ppp_prot\\v9s_int8_ppp_prot.xml",
+      "precision": "INT8",
+      "model_variant": "v9-s",
+      "embedded_preprocess": true,
+      "letterbox_embedded": true,
+      "input_size": [
+        640,
+        640
+      ],
+      "threads": 4,
+      "performance_hint": "LATENCY",
+      "warmup": 30,
+      "iters": 200,
+      "latency_mean_ms": 48.069,
+      "latency_p50_ms": 48.223,
+      "latency_p95_ms": 57.52,
+      "fps": 20.8,
+      "avg_cpu_pct": 302.76,
+      "cpu_sec_per_100_frames": 14.5547,
+      "peak_rss_mb": 545.21,
+      "disk_size_mb": 8.92,
+      "evaluated_images": 500,
+      "detections": 65962,
+      "map_50_95": 50.701,
+      "map_50": 67.394,
+      "ap_small": 32.349,
+      "ap_medium": 56.514,
+      "ap_large": 65.451,
+      "compare_to": "v9-s-fp16"
+    }
+  ],
+  "comparisons": [
+    {
+      "candidate": "v9-t-int8-ppp",
+      "baseline": "v9-t-fp16",
+      "verdict": "ROLLBACK (Keep Vanilla)",
+      "passed": false,
+      "deltas": {
+        "map_50_95_delta_pp": -2.823,
+        "ap_small_delta_pp": -2.546,
+        "latency_p95_reduction_pct": 69.03,
+        "cpu_sec_per_100_reduction_pct": 54.18,
+        "peak_rss_pct_of_baseline": 100.76
+      },
+      "failed_criteria": [
+        "mAP@0.5:0.95 delta -2.823% < -0.500%",
+        "AP_small delta -2.546% < -1.000%"
+      ]
+    },
+    {
+      "candidate": "v9-t-int8-ppp-protect-heads",
+      "baseline": "v9-t-fp16",
+      "verdict": "PASS (Adopt Upgraded)",
+      "passed": true,
+      "deltas": {
+        "map_50_95_delta_pp": -0.284,
+        "ap_small_delta_pp": -0.933,
+        "latency_p95_reduction_pct": 50.96,
+        "cpu_sec_per_100_reduction_pct": 50.37,
+        "peak_rss_pct_of_baseline": 104.88
+      },
+      "failed_criteria": []
+    },
+    {
+      "candidate": "v9-s-int8-ppp",
+      "baseline": "v9-s-fp16",
+      "verdict": "ROLLBACK (Keep Vanilla)",
+      "passed": false,
+      "deltas": {
+        "map_50_95_delta_pp": -2.354,
+        "ap_small_delta_pp": -2.165,
+        "latency_p95_reduction_pct": 53.63,
+        "cpu_sec_per_100_reduction_pct": 61.08,
+        "peak_rss_pct_of_baseline": 102.35
+      },
+      "failed_criteria": [
+        "mAP@0.5:0.95 delta -2.354% < -0.500%",
+        "AP_small delta -2.165% < -1.000%"
+      ]
+    },
+    {
+      "candidate": "v9-s-int8-ppp-protect-heads",
+      "baseline": "v9-s-fp16",
+      "verdict": "PASS (Adopt Upgraded)",
+      "passed": true,
+      "deltas": {
+        "map_50_95_delta_pp": -0.223,
+        "ap_small_delta_pp": -0.244,
+        "latency_p95_reduction_pct": 50.87,
+        "cpu_sec_per_100_reduction_pct": 60.6,
+        "peak_rss_pct_of_baseline": 100.89
+      },
+      "failed_criteria": []
+    }
+  ]
+}

@@ -108,10 +108,29 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
       - `v9-t_fp16`: Mean `8.95 ms`, P50 `8.44 ms`, P95 `11.18 ms`, `111.74 FPS`, CPU-s/100f `2.9688`, Peak RSS `180.8 MB`, Disk `4.29 MB`.
       - `v9-t-opt_int8_ppp`: Mean `4.98 ms`, P50 `4.91 ms`, P95 `5.54 ms` (`+50.44%` speedup), `200.88 FPS`, CPU-s/100f `2.1094` (`+28.95%` reduction), Peak RSS `208.2 MB` (`115.15%`), Disk `3.39 MB` (`-20.88%`).
       - Gate PASS & ROLLBACK unit assertions passed.
-  - **Git commit hash:** `pending-phase-5-commit` (updated in Phase 6 commit)
+  - **Git commit hash:** `5bf0c90` (`feat(phase-5): add isolated A/B OpenVINO benchmark suite and Go/No-Go gate`; enhanced in Phase 6 commit with `compare_to` multi-baseline support)
   - **Repo-specific findings & notes:**
-    - Benchmarking each model in an isolated child worker (`--worker-json`) is essential on Windows so monotonic `peak_wset` RSS from the baseline model does not contaminate the candidate's Peak RSS measurement.
+    - Benchmarking each model in an isolated child worker is essential on Windows so monotonic `peak_wset` RSS from the baseline model does not contaminate the candidate's Peak RSS measurement.
     - For COCO mAP with `--max-eval-images <N>`, setting `coco_eval.params.imgIds = evaluated_ids` prevents `pycocotools` from normalizing recall over un-evaluated dataset images.
-- [ ] **Phase 6: Automated Real Baseline Benchmark on COCO `val2017`** (`[ ] Pending`)
+- [x] **Phase 6: Automated Real Baseline Benchmark on COCO `val2017`**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `scripts/benchmark_compare.py` (added multi-baseline `compare_to`, `--models`, `--output-md`/`--output-json`, `--eval-max-det`, `--no-isolate`)
+    - `benchmark_report_coco_pretrained.md`, `benchmark_report_coco_pretrained.json` (real 500-image COCO `val2017` OpenVINO benchmark report)
+    - `yolo/model/module.py`, `yolo/model/yolo.py` (commits `67793ce`, `2cefe92`: added `Detection.class_neck` auto-adaptation for official `v1.0-alpha/v9-t.pt` `class_neck=80` weights, and `--no-drop-frames` in `demo_stream_count.py`)
+  - **Verification command(s) & output:**
+    - Downloaded official `v9-t.pt` (`12.24 MB`) & `v9-s.pt` (`39.93 MB`) from `MultimediaTechLab/YOLO` `v1.0-alpha`, plus COCO `val2017` (`5,000` images + `instances_val2017.json`) into ignored `data/coco_val2017/`.
+    - Exported `v9-t` and `v9-s` to OpenVINO `FP16` (`640x640`), `INT8 + PPP` (250 real `val2017` images), and `INT8 + PPP + --protect-heads`.
+    - `.venv\Scripts\python.exe scripts/benchmark_compare.py --manifest exports/coco_bench/manifest_all.yaml --val-images data/coco_val2017/images/val2017 --val-ann data/coco_val2017/annotations/instances_val2017.json --max-eval-images 500 --threads 4 --warmup 30 --iters 200 --output-md benchmark_report_coco_pretrained.md --output-json benchmark_report_coco_pretrained.json`:
+      - `v9-t-fp16`: mAP@0.5:0.95 `41.39%`, AP_small `22.92%`, Mean `57.34 ms` (P95 `68.99 ms`, `17.44 FPS`), CPU-s/100f `14.594`, Peak RSS `533.9 MB`.
+      - `v9-t-int8-ppp`: mAP@0.5:0.95 `38.57%` (`-2.823 pp` -> `ROLLBACK`, triggered `--protect-heads` auto-fallback).
+      - `v9-t-int8-ppp-protect-heads`: mAP@0.5:0.95 `41.11%` (`-0.284 pp`), AP_small `21.99%` (`-0.933 pp`), Mean `26.70 ms` (P95 `33.84 ms`, `+50.96%` faster, `37.46 FPS`), CPU-s/100f `7.242` (`+50.37%` reduced), Peak RSS `559.9 MB` (`104.88%`) -> **`PASS (Adopt Upgraded)`**.
+      - `v9-s-fp16`: mAP@0.5:0.95 `50.92%`, AP_small `32.59%`, Mean `102.61 ms` (P95 `117.08 ms`, `9.75 FPS`), CPU-s/100f `36.938`, Peak RSS `540.4 MB`.
+      - `v9-s-int8-ppp`: mAP@0.5:0.95 `48.57%` (`-2.354 pp` -> `ROLLBACK`, triggered `--protect-heads` auto-fallback).
+      - `v9-s-int8-ppp-protect-heads`: mAP@0.5:0.95 `50.70%` (`-0.223 pp`), AP_small `32.35%` (`-0.244 pp`), Mean `48.07 ms` (P95 `57.52 ms`, `+50.87%` faster, `20.80 FPS`), CPU-s/100f `14.555` (`+60.60%` reduced), Peak RSS `545.2 MB` (`100.89%`) -> **`PASS (Adopt Upgraded)`**.
+  - **Git commit hash:** `pending-phase-6-commit` (updated in Phase 7 commit)
+  - **Repo-specific findings & notes:**
+    - Official `v1.0-alpha/v9-t.pt` was trained with `Detection.class_conv` `class_neck=80` rather than current upstream `max(64, min(160, 128))=128`; `YOLO._maybe_adapt_head_class_neck()` aligns `class_conv` width on matched-class checkpoints so `v9-t.pt` loads all 1,776 tensors cleanly.
+    - Unprotected INT8 quantization dropped mAP by `-2.82 pp` (`v9-t`) and `-2.35 pp` (`v9-s`); `--protect-heads` restored mAP within `-0.22` to `-0.28 pp` while preserving >50% P95 speedup and CPU reduction.
 - [ ] **Phase 7: End-to-End Verification & Smoke Tests (`tests/test_upgrade_smoke.py`)** (`[ ] Pending`)
 - [ ] **Phase 8: Clean Git Commits & `HANDOFF.md`** (`[ ] Pending`)
