@@ -67,6 +67,7 @@ class Detection(nn.Module):
         reg_max: int = 16,
         use_group: bool = True,
         activation: Optional[str] = "SiLU",
+        class_neck: Optional[int] = None,
     ):
         super().__init__()
 
@@ -75,7 +76,10 @@ class Detection(nn.Module):
 
         first_neck, in_channels = in_channels
         anchor_neck = max(round_up(first_neck // 4, groups), anchor_channels, reg_max)
-        class_neck = max(first_neck, min(num_classes * 2, 128))
+        if class_neck is None:
+            class_neck = max(first_neck, min(num_classes * 2, 128))
+        self.num_classes = num_classes
+        self.activation_name = activation
 
         self.anchor_conv = nn.Sequential(
             Conv(in_channels, anchor_neck, 3, activation=activation),

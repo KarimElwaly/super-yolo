@@ -215,6 +215,35 @@ class YOLO(nn.Module):
         """Load shape-matched layers from a checkpoint into this model (strict=False)."""
         return load_partial_weights(self, weights, strict=strict)
 
+    def _maybe_adapt_head_class_neck(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Align Detection.class_conv neck width when loading official v1.0-alpha checkpoints (e.g. v9-t.pt class_neck=80)."""
+        from yolo.model.module import Conv, MultiheadDetection
+
+        adapted = False
+        for layer_idx, layer in enumerate(self.model):
+            if not isinstance(layer, MultiheadDetection):
+                continue
+            for head_idx, head in enumerate(layer.heads):
+                c0_key = f"{layer_idx}.heads.{head_idx}.class_conv.0.conv.weight"
+                c2_key = f"{layer_idx}.heads.{head_idx}.class_conv.2.weight"
+                if c0_key not in weights or c2_key not in weights:
+                    continue
+                ckpt_neck, ckpt_in_c = int(weights[c0_key].shape[0]), int(weights[c0_key].shape[1])
+                ckpt_cls = int(weights[c2_key].shape[0])
+                cur_in_c = int(head.class_conv[0].conv.in_channels)
+                cur_neck = int(head.class_conv[0].conv.out_channels)
+                cur_cls = int(head.class_conv[2].out_channels)
+                if ckpt_cls == cur_cls and ckpt_in_c == cur_in_c and ckpt_neck != cur_neck:
+                    act_name = getattr(head, "activation_name", "SiLU")
+                    head.class_conv = nn.Sequential(
+                        Conv(cur_in_c, ckpt_neck, 3, activation=act_name),
+                        Conv(ckpt_neck, ckpt_neck, 3, activation=act_name),
+                        nn.Conv2d(ckpt_neck, cur_cls, 1),
+                    )
+                    adapted = True
+        if adapted:
+            logger.info(":wrench: Adapted Detection class_conv neck width to match checkpoint head dimensions")
+
     def save_load_weights(self, weights: Union[Path, OrderedDict]):
         """
         Update the model's weights with the provided weights.
@@ -226,6 +255,7 @@ class YOLO(nn.Module):
             weights = torch.load(weights, map_location=torch.device("cpu"), weights_only=False)
         if "state_dict" in weights:
             weights = {name.removeprefix("model.model."): key for name, key in weights["state_dict"].items()}
+        self._maybe_adapt_head_class_neck(weights)
         model_state_dict = self.model.state_dict()
 
         # TODO1: autoload old version weight
