@@ -164,16 +164,18 @@ def create_tracker(conf_threshold: float = 0.25):
 
 
 class ThreadedFrameGrabber:
-    """Reads video/RTSP frames on a background thread and drops stale frames for low latency."""
+    """Reads video/RTSP frames on a background thread, optionally dropping stale frames for low latency."""
 
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, drop_stale: bool = True) -> None:
         cap_src = int(source) if str(source).isdigit() else str(source)
         self.cap = cv2.VideoCapture(cap_src)
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open video/stream source: {source}")
+        self.drop_stale = bool(drop_stale)
         self._lock = Lock()
         self._stop = Event()
         self._latest_frame: Optional[np.ndarray] = None
+        self._queue: List[np.ndarray] = []
         self._ended = False
         self._thread = Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
@@ -186,16 +188,21 @@ class ThreadedFrameGrabber:
                     self._ended = True
                 break
             with self._lock:
-                self._latest_frame = frame
+                if self.drop_stale:
+                    self._latest_frame = frame
+                else:
+                    self._queue.append(frame)
 
     def read(self, timeout_s: float = 2.0) -> Tuple[bool, Optional[np.ndarray]]:
         deadline = time.perf_counter() + timeout_s
         while time.perf_counter() < deadline:
             with self._lock:
-                if self._latest_frame is not None:
+                if self.drop_stale and self._latest_frame is not None:
                     frame = self._latest_frame
                     self._latest_frame = None
                     return True, frame
+                if not self.drop_stale and self._queue:
+                    return True, self._queue.pop(0)
                 if self._ended:
                     return False, None
             time.sleep(0.002)
@@ -218,6 +225,7 @@ def run_stream_pipeline(
     max_frames: int = 0,
     output_video: Optional[Path] = None,
     display: bool = False,
+    drop_stale: bool = True,
 ) -> Dict[str, Any]:
     detector = OpenVINODetector(
         model_xml_path=model_xml,
@@ -228,7 +236,7 @@ def run_stream_pipeline(
     )
     tracker = create_tracker(conf_threshold=conf_threshold)
 
-    grabber = ThreadedFrameGrabber(source)
+    grabber = ThreadedFrameGrabber(source, drop_stale=drop_stale)
     ok, first_frame = grabber.read(timeout_s=5.0)
     if not ok or first_frame is None:
         grabber.release()
@@ -321,6 +329,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0 = until stream ends).")
     parser.add_argument("--output", type=Path, default=None, help="Optional output annotated MP4 path.")
     parser.add_argument("--display", action="store_true", help="Display live OpenCV window.")
+    parser.add_argument("--no-drop-frames", action="store_true", help="Process every frame sequentially instead of dropping stale frames.")
     args = parser.parse_args(argv)
 
     summary = run_stream_pipeline(
@@ -333,6 +342,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_frames=args.max_frames,
         output_video=args.output,
         display=args.display,
+        drop_stale=not args.no_drop_frames,
     )
     print(f"[OK] Stream summary: {summary}")
     return 0
