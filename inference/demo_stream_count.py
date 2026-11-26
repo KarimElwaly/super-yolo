@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -166,12 +166,15 @@ def create_tracker(conf_threshold: float = 0.25):
 class ThreadedFrameGrabber:
     """Reads video/RTSP frames on a background thread, optionally dropping stale frames for low latency."""
 
-    def __init__(self, source: str, drop_stale: bool = True) -> None:
+    def __init__(self, source: str, drop_stale: bool = True, max_queue_size: int = 16) -> None:
         cap_src = int(source) if str(source).isdigit() else str(source)
         self.cap = cv2.VideoCapture(cap_src)
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open video/stream source: {source}")
+        raw_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        self.source_fps: float = raw_fps if 1.0 <= raw_fps <= 120.0 else 30.0
         self.drop_stale = bool(drop_stale)
+        self.max_queue_size = max(1, int(max_queue_size))
         self._lock = Lock()
         self._stop = Event()
         self._latest_frame: Optional[np.ndarray] = None
@@ -182,6 +185,12 @@ class ThreadedFrameGrabber:
 
     def _reader_loop(self) -> None:
         while not self._stop.is_set():
+            if not self.drop_stale:
+                with self._lock:
+                    queue_full = len(self._queue) >= self.max_queue_size
+                if queue_full:
+                    time.sleep(0.005)
+                    continue
             ok, frame = self.cap.read()
             if not ok:
                 with self._lock:
@@ -214,6 +223,29 @@ class ThreadedFrameGrabber:
         self.cap.release()
 
 
+def _resolve_class_filter(
+    target_classes: Optional[List[str]],
+    class_names: List[str],
+) -> Optional[set[int]]:
+    """Resolve CLI class names/IDs into a set of integer class IDs, or None for all classes."""
+    if not target_classes:
+        return None
+    name_to_id = {name.strip().lower(): idx for idx, name in enumerate(class_names)}
+    resolved: set[int] = set()
+    for raw in target_classes:
+        for token in str(raw).split(","):
+            item = token.strip()
+            if not item:
+                continue
+            if item.lstrip("-").isdigit():
+                resolved.add(int(item))
+            elif item.lower() in name_to_id:
+                resolved.add(name_to_id[item.lower()])
+            else:
+                raise ValueError(f"Unknown class '{item}'. Available: {class_names}")
+    return resolved or None
+
+
 def run_stream_pipeline(
     *,
     model_xml: Path,
@@ -226,6 +258,7 @@ def run_stream_pipeline(
     output_video: Optional[Path] = None,
     display: bool = False,
     drop_stale: bool = True,
+    target_classes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     detector = OpenVINODetector(
         model_xml_path=model_xml,
@@ -234,6 +267,7 @@ def run_stream_pipeline(
         conf_threshold=conf_threshold,
         iou_threshold=iou_threshold,
     )
+    allowed_ids = _resolve_class_filter(target_classes, detector.class_names)
     tracker = create_tracker(conf_threshold=conf_threshold)
 
     grabber = ThreadedFrameGrabber(source, drop_stale=drop_stale)
@@ -258,9 +292,11 @@ def run_stream_pipeline(
     writer = None
     if output_video is not None:
         output_video.parent.mkdir(parents=True, exist_ok=True)
-        writer = cv2.VideoWriter(str(output_video), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (w, h))
+        writer = cv2.VideoWriter(str(output_video), cv2.VideoWriter_fourcc(*"mp4v"), grabber.source_fps, (w, h))
 
     frame_idx = 0
+    total_detections = 0
+    unique_track_ids: set[int] = set()
     last_detections = sv.Detections.empty()
     t_start = time.perf_counter()
 
@@ -269,14 +305,20 @@ def run_stream_pipeline(
         while frame is not None:
             if frame_idx % max(1, detect_every_n) == 0:
                 raw_dets = detector.detect(frame)
+                if allowed_ids is not None and len(raw_dets) > 0 and raw_dets.class_id is not None:
+                    keep = np.isin(raw_dets.class_id, sorted(allowed_ids))
+                    raw_dets = raw_dets[keep]
                 last_detections = tracker.update_with_detections(raw_dets)
+                total_detections += len(raw_dets)
+                if last_detections.tracker_id is not None:
+                    unique_track_ids.update(int(t) for t in last_detections.tracker_id.tolist())
 
             line_zone.trigger(last_detections)
             poly_zone.trigger(last_detections)
 
             annotated = box_annotator.annotate(scene=frame.copy(), detections=last_detections)
             labels = [
-                f"#{tid} cls:{cid} {conf:.2f}"
+                f"#{tid} {detector.class_names[int(cid)] if 0 <= int(cid) < len(detector.class_names) else f'cls:{cid}'} {conf:.2f}"
                 for tid, cid, conf in zip(
                     last_detections.tracker_id if last_detections.tracker_id is not None else [-1] * len(last_detections),
                     last_detections.class_id if last_detections.class_id is not None else [0] * len(last_detections),
@@ -312,6 +354,8 @@ def run_stream_pipeline(
     return {
         "frames_processed": frame_idx,
         "fps": round(frame_idx / elapsed, 2),
+        "total_detections": int(total_detections),
+        "unique_track_ids": len(unique_track_ids),
         "line_in_count": int(line_zone.in_count),
         "line_out_count": int(line_zone.out_count),
         "polygon_current_count": int(poly_zone.current_count),
@@ -325,6 +369,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--threads", type=int, default=4, help="OpenVINO CPU inference threads (default: 4).")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (default: 0.25).")
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (default: 0.45).")
+    parser.add_argument("--classes", nargs="+", default=None, help="Filter detections by class ID(s) or name(s), e.g. --classes 0 or --classes Person.")
     parser.add_argument("--detect-every-n", type=int, default=1, help="Run detector every N frames (default: 1).")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0 = until stream ends).")
     parser.add_argument("--output", type=Path, default=None, help="Optional output annotated MP4 path.")
@@ -343,6 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         output_video=args.output,
         display=args.display,
         drop_stale=not args.no_drop_frames,
+        target_classes=args.classes,
     )
     print(f"[OK] Stream summary: {summary}")
     return 0
