@@ -16,7 +16,15 @@ from yolo.utils.model_utils import PostProcess, create_optimizer, create_schedul
 class BaseModel(LightningModule):
     def __init__(self, cfg: Config):
         super().__init__()
-        self.model = create_model(cfg.model, class_num=cfg.dataset.class_num, weight_path=cfg.weight)
+        partial_weights = getattr(cfg, "partial_weights", None)
+        partial_load = bool(getattr(cfg, "partial_load", False))
+        weight_path = partial_weights if partial_weights else cfg.weight
+        self.model = create_model(
+            cfg.model,
+            class_num=cfg.dataset.class_num,
+            weight_path=weight_path,
+            partial_load=partial_load or bool(partial_weights),
+        )
 
     def forward(self, x):
         return self.model(x)

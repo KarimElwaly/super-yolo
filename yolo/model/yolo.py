@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from omegaconf import ListConfig, OmegaConf
@@ -10,6 +10,26 @@ from yolo.config.config import ModelConfig, YOLOLayer
 from yolo.tools.dataset_preparation import prepare_weight
 from yolo.utils.logger import logger
 from yolo.utils.module_utils import get_layer_map
+
+ACTIVATION_LAYER_TYPES = {
+    "Conv",
+    "ELAN",
+    "RepConv",
+    "Bottleneck",
+    "RepNCSP",
+    "RepNCSPELAN",
+    "AConv",
+    "ADown",
+    "SPPELAN",
+    "SPPCSPConv",
+    "Detection",
+    "MultiheadDetection",
+    "Segmentation",
+    "MultiheadSegmentation",
+    "Classification",
+    "DConv",
+    "RepNCSPELAND",
+}
 
 
 class YOLO(nn.Module):
@@ -27,6 +47,7 @@ class YOLO(nn.Module):
         self.layer_map = get_layer_map()  # Get the map Dict[str: Module]
         self.model: List[YOLOLayer] = nn.ModuleList()
         self.reg_max = getattr(model_cfg.anchor, "reg_max", 16)
+        self.default_activation = getattr(model_cfg, "activation", None)
         self.build_model(model_cfg.model)
 
     def build_model(self, model_arch: Dict[str, List[Dict[str, Dict[str, Dict]]]]):
@@ -38,7 +59,14 @@ class YOLO(nn.Module):
                 logger.info(f"  :building_construction:  Building {arch_name}")
             for layer_idx, layer_spec in enumerate(model_arch[arch_name], start=layer_idx):
                 layer_type, layer_info = next(iter(layer_spec.items()))
-                layer_args = layer_info.get("args", {})
+                layer_args = dict(layer_info.get("args", {}) or {})
+
+                if (
+                    self.default_activation is not None
+                    and layer_type in ACTIVATION_LAYER_TYPES
+                    and "activation" not in layer_args
+                ):
+                    layer_args["activation"] = self.default_activation
 
                 # Get input source
                 source = self.get_source_idx(layer_info.get("source", -1), layer_idx)
@@ -55,7 +83,7 @@ class YOLO(nn.Module):
                     layer_args["reg_max"] = self.reg_max
 
                 # create layers
-                layer = self.create_layer(layer_type, source, layer_info, **layer_args)
+                layer = self.create_layer(layer_type, source, layer_info, arch_section=arch_name, **layer_args)
                 self.model.append(layer)
 
                 if layer.tags:
@@ -90,7 +118,7 @@ class YOLO(nn.Module):
         return output
 
     def get_out_channels(self, layer_type: str, layer_args: dict, output_dim: list, source: Union[int, list]):
-        if hasattr(layer_args, "out_channels"):
+        if "out_channels" in layer_args:
             return layer_args["out_channels"]
         if layer_type == "CBFuse":
             return output_dim[source[-1]]
@@ -110,7 +138,14 @@ class YOLO(nn.Module):
             self.model[source - 1].usable = True
         return source
 
-    def create_layer(self, layer_type: str, source: Union[int, list], layer_info: Dict, **kwargs) -> YOLOLayer:
+    def create_layer(
+        self,
+        layer_type: str,
+        source: Union[int, list],
+        layer_info: Dict,
+        arch_section: Optional[str] = None,
+        **kwargs,
+    ) -> YOLOLayer:
         if layer_type in self.layer_map:
             layer = self.layer_map[layer_type](**kwargs)
             setattr(layer, "layer_type", layer_type)
@@ -120,9 +155,65 @@ class YOLO(nn.Module):
             setattr(layer, "tags", layer_info.get("tags", None))
             setattr(layer, "external", layer_info.get("external", []))
             setattr(layer, "usable", 0)
+            setattr(layer, "arch_section", arch_section)
             return layer
         else:
             raise ValueError(f"Unsupported layer type: {layer_type}")
+
+    def strip_auxiliary_branches(self) -> Dict[str, int]:
+        """Remove training-only auxiliary (PGI) layers so exported graphs contain zero aux ops."""
+        aux_indices = {
+            idx
+            for idx, layer in enumerate(self.model, start=1)
+            if getattr(layer, "arch_section", None) == "auxiliary" or getattr(layer, "tags", None) == "AUX"
+        }
+        if not aux_indices:
+            return {"removed_layers": 0, "removed_params": 0, "remaining_layers": len(self.model)}
+
+        for idx, layer in enumerate(self.model, start=1):
+            if idx in aux_indices:
+                continue
+            sources = layer.source if isinstance(layer.source, list) else [layer.source]
+            for src in sources:
+                if src in aux_indices:
+                    raise RuntimeError(f"Retained layer {idx} ({layer.tags}) depends on auxiliary layer {src}")
+
+        kept_layers: List[nn.Module] = []
+        index_remap: Dict[int, int] = {0: 0, -1: -1}
+        removed_params = 0
+        for old_idx, layer in enumerate(self.model, start=1):
+            if old_idx in aux_indices:
+                removed_params += sum(p.numel() for p in layer.parameters())
+                continue
+            new_idx = len(kept_layers) + 1
+            index_remap[old_idx] = new_idx
+            kept_layers.append(layer)
+
+        new_layer_index: Dict[str, int] = {}
+        for new_idx, layer in enumerate(kept_layers, start=1):
+            if isinstance(layer.source, list):
+                layer.source = [index_remap[s] for s in layer.source]
+            else:
+                layer.source = index_remap[layer.source]
+            if getattr(layer, "tags", None):
+                new_layer_index[layer.tags] = new_idx
+
+        self.model = nn.ModuleList(kept_layers)
+        self.layer_index = new_layer_index
+        removed_count = len(aux_indices)
+        logger.info(
+            f":scissors: Stripped {removed_count} auxiliary layer(s) ({removed_params:,} params); "
+            f"{len(kept_layers)} inference layer(s) remain"
+        )
+        return {
+            "removed_layers": removed_count,
+            "removed_params": removed_params,
+            "remaining_layers": len(kept_layers),
+        }
+
+    def load_partial_weights(self, weights: Union[str, Path, OrderedDict], strict: bool = False) -> Dict[str, Any]:
+        """Load shape-matched layers from a checkpoint into this model (strict=False)."""
+        return load_partial_weights(self, weights, strict=strict)
 
     def save_load_weights(self, weights: Union[Path, OrderedDict]):
         """
@@ -164,7 +255,81 @@ class YOLO(nn.Module):
         self.model.load_state_dict(model_state_dict)
 
 
-def create_model(model_cfg: ModelConfig, weight_path: Union[bool, Path] = True, class_num: int = 80) -> YOLO:
+def _extract_state_dict(weights: Union[str, Path, Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    if isinstance(weights, (str, Path)):
+        raw = torch.load(Path(weights), map_location=torch.device("cpu"), weights_only=False)
+    else:
+        raw = weights
+    if isinstance(raw, dict) and "state_dict" in raw:
+        raw = raw["state_dict"]
+    elif isinstance(raw, dict) and "model" in raw and isinstance(raw["model"], dict):
+        raw = raw["model"]
+
+    normalized: Dict[str, torch.Tensor] = {}
+    for k, v in raw.items():
+        if not isinstance(v, torch.Tensor):
+            continue
+        clean_k = k
+        for prefix in ("model.model.", "ema.model.", "model."):
+            if clean_k.startswith(prefix):
+                clean_k = clean_k[len(prefix) :]
+                break
+        normalized[clean_k] = v
+    return normalized
+
+
+def load_partial_weights(
+    model: YOLO,
+    weights: Union[str, Path, Dict[str, Any]],
+    strict: bool = False,
+) -> Dict[str, Any]:
+    """Load shape-matched layers from a pretrained checkpoint into an upgraded YOLO model."""
+    src_state = _extract_state_dict(weights)
+    target_state = model.model.state_dict()
+
+    matched: Dict[str, torch.Tensor] = {}
+    mismatched: List[str] = []
+    missing_only: List[str] = []
+
+    for key, target_tensor in target_state.items():
+        if key not in src_state:
+            missing_only.append(key)
+            continue
+        if src_state[key].shape != target_tensor.shape:
+            mismatched.append(key)
+            continue
+        matched[key] = src_state[key].to(dtype=target_tensor.dtype)
+
+    model.model.load_state_dict(matched, strict=strict)
+
+    reinitialized = mismatched + missing_only
+    logger.info(
+        f":package: Partial weight transfer: {len(matched)}/{len(target_state)} tensors loaded, "
+        f"{len(mismatched)} shape-mismatched, {len(missing_only)} newly initialized "
+        f"({len(reinitialized)} total re-initialized)"
+    )
+    return {
+        "loaded": len(matched),
+        "skipped_mismatch": len(mismatched),
+        "missing": len(missing_only),
+        "reinitialized": len(reinitialized),
+        "total_target": len(target_state),
+        "mismatch_keys": mismatched,
+        "reinitialized_keys": reinitialized,
+    }
+
+
+def strip_auxiliary_branches(model: YOLO) -> Dict[str, int]:
+    """Module-level wrapper around `YOLO.strip_auxiliary_branches()`."""
+    return model.strip_auxiliary_branches()
+
+
+def create_model(
+    model_cfg: ModelConfig,
+    weight_path: Union[bool, str, Path] = True,
+    class_num: int = 80,
+    partial_load: bool = False,
+) -> YOLO:
     """Constructs and returns a model from a Dictionary configuration file.
 
     Args:
@@ -185,7 +350,10 @@ def create_model(model_cfg: ModelConfig, weight_path: Union[bool, Path] = True, 
             logger.info(f"🌐 Weight {weight_path} not found, try downloading")
             prepare_weight(weight_path=weight_path)
         if weight_path.exists():
-            model.save_load_weights(weight_path)
+            if partial_load:
+                load_partial_weights(model, weight_path, strict=False)
+            else:
+                model.save_load_weights(weight_path)
             logger.info(":white_check_mark: Success load model & weight")
     else:
         logger.info(":white_check_mark: Success load model")

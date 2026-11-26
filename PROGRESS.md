@@ -37,10 +37,30 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
   - **Verification command(s) & output:**
     - `.venv\Scripts\python.exe scripts/check_licenses.py` -> `Scanned 107 installed packages. PASSED: All 107 packages are compliant (0 GPL/AGPL, 0 banned packages).` (exit code `0`)
     - End-to-end synthetic check: `custom_template` Hydra compose OK; `scripts/convert_yolo_to_coco.py --verify --verify-samples 1` converted and verified 2 train + 2 val images / 3 boxes per split; `scripts/filter_coco_classes.py --classes person,bus` filtered to 2 classes `[0, 1]` and loaded cleanly in `YoloDataset` (2 samples).
-  - **Git commit hash:** `pending-phase-1-commit` (updated in Phase 2 commit)
+  - **Git commit hash:** `6324bdb` (`feat(phase-1): add license audit, yolo-to-coco converter, coco class filter, and dataset template`)
   - **Repo-specific findings & notes:**
     - Several scientific wheels (`cycler`, `kiwisolver`, `matplotlib`, `scipy`) embed multi-line license text in `License:` headers while `faster-coco-eval` stores Apache-2.0 text only in `.dist-info/licenses/LICENSE`; `check_licenses.py` handles `License-Expression`, full-text `License`, `Classifier`, and `dist.locate_file()` inspection.
-- [ ] **Phase 2: CPU-Optimized & High-Accuracy Architecture Upgrades (Additive)** (`[ ] Pending`)
+- [x] **Phase 2: CPU-Optimized & High-Accuracy Architecture Upgrades (Additive)**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `yolo/config/model/v9-t-opt.yaml`, `yolo/config/model/v9-s-opt.yaml` (`activation: ReLU`, explicit `strides: [8, 16, 32]`)
+    - `yolo/config/model/v9-m-opt.yaml` (`activation: HardSwish`, explicit `strides: [8, 16, 32]`)
+    - `yolo/config/model/v9-t-opt-p2.yaml`, `yolo/config/model/v9-s-opt-p2.yaml` (`activation: ReLU`, stride-4 P2 head `strides: [4, 8, 16, 32]`, trimmed P5 channels)
+    - `yolo/config/config.py`, `yolo/config/general.yaml` (`ModelConfig.activation`, opt-in `partial_load` and `partial_weights`)
+    - `yolo/utils/module_utils.py` (`inplace`-aware `create_activation_function`)
+    - `yolo/model/module.py` (propagated `activation` through `Detection`, `MultiheadDetection`, `Segmentation`, `MultiheadSegmentation`, `Classification`, `RepNCSP`, `RepNCSPELAN`, `AConv`, `ADown`, `SPPCSPConv`, `SPPELAN`, `DConv`, `RepNCSPELAND` while keeping `SiLU` default)
+    - `yolo/model/yolo.py` (`YOLO.default_activation`, `arch_section` tagging, `strip_auxiliary_branches()`, `load_partial_weights()`, opt-in `partial_load` in `create_model`)
+    - `yolo/tools/solver.py` (opt-in `partial_load` / `partial_weights` support in `BaseModel`)
+    - `yolo/utils/bounding_box_utils.py` (device-aware `dummy_input` in `Vec2Box.create_auto_anchor`)
+  - **Verification command(s) & output:**
+    - Vanilla `v9-t` (`SiLU=237`), `v9-s` (`SiLU=237`), `v9-m` (`SiLU=206`) built and passed forward check with `SiLU` only.
+    - Upgraded `-opt` / `-p2`: `v9-t-opt` (`ReLU=237, SiLU=0`), `v9-s-opt` (`ReLU=237, SiLU=0`), `v9-m-opt` (`Hardswish=206, SiLU=0`), `v9-t-opt-p2` (`ReLU=312, heads=4, strides=[4,8,16,32]`), `v9-s-opt-p2` (`ReLU=312, heads=4, strides=[4,8,16,32]`) all built and passed forward + `Vec2Box`.
+    - `strip_auxiliary_branches()` removed 8–16 aux layers and matched pre/post-strip `"Main"` outputs within `atol=1e-6`.
+    - `load_partial_weights()`: `1776/1776` matched for `v9-t -> v9-t-opt`; `808/2344` matched (`1536` re-initialized) for `v9-t -> v9-t-opt-p2 (3 cls)`.
+    - `.venv\Scripts\python.exe -m pytest tests/test_model tests/test_utils/test_module_utils.py -q -p no:cacheprovider` -> `26 passed in 7.50s`.
+  - **Git commit hash:** `pending-phase-2-commit` (updated in Phase 3 commit)
+  - **Repo-specific findings & notes:**
+    - `YOLO.get_out_channels` used `hasattr(layer_args, "out_channels")`, which only worked on `OmegaConf.DictConfig` and failed on plain `dict`; updated to `"out_channels" in layer_args` so copied `dict` args work cleanly.
 - [ ] **Phase 3: Zero-Inference-Cost Accuracy Boosters (Training-Time Only)** (`[ ] Pending`)
 - [ ] **Phase 4: OpenVINO Export, NNCF INT8, PrePostProcessor & Unified Detector** (`[ ] Pending`)
 - [ ] **Phase 5: Automated A/B Benchmark Suite (`scripts/benchmark_compare.py`)** (`[ ] Pending`)

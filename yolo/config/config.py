@@ -29,6 +29,7 @@ class ModelConfig:
     name: Optional[str]
     anchor: AnchorConfig
     model: Dict[str, BlockConfig]
+    activation: Optional[str] = None
 
 
 @dataclass
@@ -159,6 +160,8 @@ class Config:
     use_tensorboard: bool
 
     weight: Optional[str]
+    partial_load: bool = False
+    partial_weights: Optional[str] = None
 
 
 @dataclass

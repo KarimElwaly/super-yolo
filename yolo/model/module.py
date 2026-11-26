@@ -59,7 +59,15 @@ class Concat(nn.Module):
 class Detection(nn.Module):
     """A single YOLO Detection head for detection models"""
 
-    def __init__(self, in_channels: Tuple[int], num_classes: int, *, reg_max: int = 16, use_group: bool = True):
+    def __init__(
+        self,
+        in_channels: Tuple[int],
+        num_classes: int,
+        *,
+        reg_max: int = 16,
+        use_group: bool = True,
+        activation: Optional[str] = "SiLU",
+    ):
         super().__init__()
 
         groups = 4 if use_group else 1
@@ -70,12 +78,14 @@ class Detection(nn.Module):
         class_neck = max(first_neck, min(num_classes * 2, 128))
 
         self.anchor_conv = nn.Sequential(
-            Conv(in_channels, anchor_neck, 3),
-            Conv(anchor_neck, anchor_neck, 3, groups=groups),
+            Conv(in_channels, anchor_neck, 3, activation=activation),
+            Conv(anchor_neck, anchor_neck, 3, groups=groups, activation=activation),
             nn.Conv2d(anchor_neck, anchor_channels, 1, groups=groups),
         )
         self.class_conv = nn.Sequential(
-            Conv(in_channels, class_neck, 3), Conv(class_neck, class_neck, 3), nn.Conv2d(class_neck, num_classes, 1)
+            Conv(in_channels, class_neck, 3, activation=activation),
+            Conv(class_neck, class_neck, 3, activation=activation),
+            nn.Conv2d(class_neck, num_classes, 1),
         )
 
         self.anc2vec = Anchor2Vec(reg_max=reg_max)
@@ -121,6 +131,7 @@ class MultiheadDetection(nn.Module):
 
         if head_kwargs.pop("version", None) == "v7":
             DetectionHead = IDetection
+            head_kwargs.pop("activation", None)
 
         self.heads = nn.ModuleList(
             [DetectionHead((in_channels[0], in_channel), num_classes, **head_kwargs) for in_channel in in_channels]
@@ -132,13 +143,15 @@ class MultiheadDetection(nn.Module):
 
 # ----------- Segmentation Class ----------- #
 class Segmentation(nn.Module):
-    def __init__(self, in_channels: Tuple[int], num_maskes: int):
+    def __init__(self, in_channels: Tuple[int], num_maskes: int, *, activation: Optional[str] = "SiLU"):
         super().__init__()
         first_neck, in_channels = in_channels
 
         mask_neck = max(first_neck // 4, num_maskes)
         self.mask_conv = nn.Sequential(
-            Conv(in_channels, mask_neck, 3), Conv(mask_neck, mask_neck, 3), nn.Conv2d(mask_neck, num_maskes, 1)
+            Conv(in_channels, mask_neck, 3, activation=activation),
+            Conv(mask_neck, mask_neck, 3, activation=activation),
+            nn.Conv2d(mask_neck, num_maskes, 1),
         )
 
     def forward(self, x: Tensor) -> Tuple[Tensor]:
@@ -152,12 +165,13 @@ class MultiheadSegmentation(nn.Module):
     def __init__(self, in_channels: List[int], num_classes: int, num_maskes: int, **head_kwargs):
         super().__init__()
         mask_channels, proto_channels = in_channels[:-1], in_channels[-1]
+        activation = head_kwargs.get("activation", "SiLU")
 
         self.detect = MultiheadDetection(mask_channels, num_classes, **head_kwargs)
         self.heads = nn.ModuleList(
-            [Segmentation((in_channels[0], in_channel), num_maskes) for in_channel in mask_channels]
+            [Segmentation((in_channels[0], in_channel), num_maskes, activation=activation) for in_channel in mask_channels]
         )
-        self.heads.append(Conv(proto_channels, num_maskes, 1))
+        self.heads.append(Conv(proto_channels, num_maskes, 1, activation=activation))
 
     def forward(self, x_list: List[torch.Tensor]) -> List[torch.Tensor]:
         return [head(x) for x, head in zip(x_list, self.heads)]
@@ -179,9 +193,17 @@ class Anchor2Vec(nn.Module):
 
 # ----------- Classification Class ----------- #
 class Classification(nn.Module):
-    def __init__(self, in_channel: int, num_classes: int, *, neck_channels=1024, **head_args):
+    def __init__(
+        self,
+        in_channel: int,
+        num_classes: int,
+        *,
+        neck_channels=1024,
+        activation: Optional[str] = "SiLU",
+        **head_args,
+    ):
         super().__init__()
-        self.conv = Conv(in_channel, neck_channels, 1)
+        self.conv = Conv(in_channel, neck_channels, 1, activation=activation)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Linear(neck_channels, num_classes)
 
@@ -264,8 +286,12 @@ class RepNCSP(nn.Module):
         self.conv2 = Conv(in_channels, neck_channels, kernel_size, **kwargs)
         self.conv3 = Conv(2 * neck_channels, out_channels, kernel_size, **kwargs)
 
+        eff_neck_args = dict(neck_args)
+        if "activation" in kwargs and "activation" not in eff_neck_args:
+            eff_neck_args["activation"] = kwargs["activation"]
+
         self.bottleneck = nn.Sequential(
-            *[Bottleneck(neck_channels, neck_channels, **neck_args) for _ in range(repeat_num)]
+            *[Bottleneck(neck_channels, neck_channels, **eff_neck_args) for _ in range(repeat_num)]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -323,13 +349,19 @@ class RepNCSPELAN(nn.Module):
         if process_channels is None:
             process_channels = part_channels // 2
 
+        eff_csp_args = dict(csp_args)
+        eff_neck_args = dict(csp_neck_args)
+        if "activation" in kwargs:
+            eff_csp_args.setdefault("activation", kwargs["activation"])
+            eff_neck_args.setdefault("activation", kwargs["activation"])
+
         self.conv1 = Conv(in_channels, part_channels, 1, **kwargs)
         self.conv2 = nn.Sequential(
-            RepNCSP(part_channels // 2, process_channels, neck_args=csp_neck_args, **csp_args),
+            RepNCSP(part_channels // 2, process_channels, neck_args=eff_neck_args, **eff_csp_args),
             Conv(process_channels, process_channels, 3, padding=1, **kwargs),
         )
         self.conv3 = nn.Sequential(
-            RepNCSP(process_channels, process_channels, neck_args=csp_neck_args, **csp_args),
+            RepNCSP(process_channels, process_channels, neck_args=eff_neck_args, **eff_csp_args),
             Conv(process_channels, process_channels, 3, padding=1, **kwargs),
         )
         self.conv4 = Conv(part_channels + 2 * process_channels, out_channels, 1, **kwargs)
@@ -345,11 +377,11 @@ class RepNCSPELAN(nn.Module):
 class AConv(nn.Module):
     """Downsampling module combining average and max pooling with convolution for feature reduction."""
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, *, activation: Optional[str] = "SiLU"):
         super().__init__()
         mid_layer = {"kernel_size": 3, "stride": 2}
         self.avg_pool = Pool("avg", kernel_size=2, stride=1)
-        self.conv = Conv(in_channels, out_channels, **mid_layer)
+        self.conv = Conv(in_channels, out_channels, activation=activation, **mid_layer)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.avg_pool(x)
@@ -360,15 +392,15 @@ class AConv(nn.Module):
 class ADown(nn.Module):
     """Downsampling module combining average and max pooling with convolution for feature reduction."""
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, *, activation: Optional[str] = "SiLU"):
         super().__init__()
         half_in_channels = in_channels // 2
         half_out_channels = out_channels // 2
         mid_layer = {"kernel_size": 3, "stride": 2}
         self.avg_pool = Pool("avg", kernel_size=2, stride=1)
-        self.conv1 = Conv(half_in_channels, half_out_channels, **mid_layer)
+        self.conv1 = Conv(half_in_channels, half_out_channels, activation=activation, **mid_layer)
         self.max_pool = Pool("max", **mid_layer)
-        self.conv2 = Conv(half_in_channels, half_out_channels, kernel_size=1)
+        self.conv2 = Conv(half_in_channels, half_out_channels, kernel_size=1, activation=activation)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.avg_pool(x)
@@ -395,18 +427,29 @@ class CBLinear(nn.Module):
 
 class SPPCSPConv(nn.Module):
     # CSP https://github.com/WongKinYiu/CrossStagePartialNetworks
-    def __init__(self, in_channels: int, out_channels: int, expand: float = 0.5, kernel_sizes: Tuple[int] = (5, 9, 13)):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        expand: float = 0.5,
+        kernel_sizes: Tuple[int] = (5, 9, 13),
+        *,
+        activation: Optional[str] = "SiLU",
+    ):
         super().__init__()
         neck_channels = int(2 * out_channels * expand)
         self.pre_conv = nn.Sequential(
-            Conv(in_channels, neck_channels, 1),
-            Conv(neck_channels, neck_channels, 3),
-            Conv(neck_channels, neck_channels, 1),
+            Conv(in_channels, neck_channels, 1, activation=activation),
+            Conv(neck_channels, neck_channels, 3, activation=activation),
+            Conv(neck_channels, neck_channels, 1, activation=activation),
         )
-        self.short_conv = Conv(in_channels, neck_channels, 1)
+        self.short_conv = Conv(in_channels, neck_channels, 1, activation=activation)
         self.pools = nn.ModuleList([Pool(kernel_size=kernel_size, stride=1) for kernel_size in kernel_sizes])
-        self.post_conv = nn.Sequential(Conv(4 * neck_channels, neck_channels, 1), Conv(neck_channels, neck_channels, 3))
-        self.merge_conv = Conv(2 * neck_channels, out_channels, 1)
+        self.post_conv = nn.Sequential(
+            Conv(4 * neck_channels, neck_channels, 1, activation=activation),
+            Conv(neck_channels, neck_channels, 3, activation=activation),
+        )
+        self.merge_conv = Conv(2 * neck_channels, out_channels, 1, activation=activation)
 
     def forward(self, x):
         features = [self.pre_conv(x)]
@@ -422,13 +465,20 @@ class SPPCSPConv(nn.Module):
 class SPPELAN(nn.Module):
     """SPPELAN module comprising multiple pooling and convolution layers."""
 
-    def __init__(self, in_channels: int, out_channels: int, neck_channels: Optional[int] = None):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        neck_channels: Optional[int] = None,
+        *,
+        activation: Optional[str] = "SiLU",
+    ):
         super(SPPELAN, self).__init__()
         neck_channels = neck_channels or out_channels // 2
 
-        self.conv1 = Conv(in_channels, neck_channels, kernel_size=1)
+        self.conv1 = Conv(in_channels, neck_channels, kernel_size=1, activation=activation)
         self.pools = nn.ModuleList([Pool("max", 5, stride=1) for _ in range(3)])
-        self.conv5 = Conv(4 * neck_channels, out_channels, kernel_size=1)
+        self.conv5 = Conv(4 * neck_channels, out_channels, kernel_size=1, activation=activation)
 
     def forward(self, x: Tensor) -> Tensor:
         features = [self.conv1(x)]
@@ -498,11 +548,11 @@ class ImplicitM(nn.Module):
 
 
 class DConv(nn.Module):
-    def __init__(self, in_channels=512, alpha=0.8, atoms=512):
+    def __init__(self, in_channels=512, alpha=0.8, atoms=512, activation: Optional[str] = "SiLU"):
         super().__init__()
         self.alpha = alpha
 
-        self.CG = Conv(in_channels, atoms, 1)
+        self.CG = Conv(in_channels, atoms, 1, activation=activation)
         self.GIE = Conv(atoms, atoms, 5, groups=atoms, activation=False)
         self.D = Conv(atoms, in_channels, 1, activation=False)
 
@@ -521,9 +571,12 @@ class DConv(nn.Module):
 
 
 class RepNCSPELAND(RepNCSPELAN):
-    def __init__(self, *args, atoms: 512, rd_args={}, **kwargs):
+    def __init__(self, *args, atoms: int = 512, rd_args={}, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dconv = DConv(atoms=atoms, **rd_args)
+        rd_kwargs = dict(rd_args)
+        if "activation" in kwargs and "activation" not in rd_kwargs:
+            rd_kwargs["activation"] = kwargs["activation"]
+        self.dconv = DConv(atoms=atoms, **rd_kwargs)
 
     def forward(self, x):
         x = super().forward(x)

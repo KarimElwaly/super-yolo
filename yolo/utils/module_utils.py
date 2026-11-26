@@ -47,7 +47,10 @@ def create_activation_function(activation: str) -> nn.Module:
         if isinstance(obj, type) and issubclass(obj, nn.Module)
     }
     if activation.lower() in activation_map:
-        return activation_map[activation.lower()](inplace=True)
+        act_cls = activation_map[activation.lower()]
+        if "inplace" in inspect.signature(act_cls.__init__).parameters:
+            return act_cls(inplace=True)
+        return act_cls()
     else:
         raise ValueError(f"Activation function '{activation}' is not found in torch.nn")
 

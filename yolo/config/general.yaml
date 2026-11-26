@@ -12,3 +12,5 @@ use_wandb: True
 use_tensorboard: False
 
 weight: True # Path to weight or True for auto, False for no pretrained weight
+partial_load: False # Opt-in strict=False shape-matched weight loading into upgraded architectures
+partial_weights: null # Optional path to pretrained checkpoint for partial loading
