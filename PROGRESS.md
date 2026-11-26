@@ -57,11 +57,30 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
     - Upgraded `-opt` / `-p2`: `v9-t-opt` (`ReLU=237, SiLU=0`), `v9-s-opt` (`ReLU=237, SiLU=0`), `v9-m-opt` (`Hardswish=206, SiLU=0`), `v9-t-opt-p2` (`ReLU=312, heads=4, strides=[4,8,16,32]`), `v9-s-opt-p2` (`ReLU=312, heads=4, strides=[4,8,16,32]`) all built and passed forward + `Vec2Box`.
     - `strip_auxiliary_branches()` removed 8–16 aux layers and matched pre/post-strip `"Main"` outputs within `atol=1e-6`.
     - `load_partial_weights()`: `1776/1776` matched for `v9-t -> v9-t-opt`; `808/2344` matched (`1536` re-initialized) for `v9-t -> v9-t-opt-p2 (3 cls)`.
-    - `.venv\Scripts\python.exe -m pytest tests/test_model tests/test_utils/test_module_utils.py -q -p no:cacheprovider` -> `26 passed in 7.50s`.
-  - **Git commit hash:** `pending-phase-2-commit` (updated in Phase 3 commit)
+    - `.venv\Scripts\python.exe -m pytest tests/test_model tests/test_utils/test_module_utils.py -q -p no:cacheprovider` -> `26 passed in 7.50s` (`test_bounding_box_utils.py` -> `13 passed in 9.67s`).
+  - **Git commit hash:** `04799e3` (`feat(phase-2): add cpu-optimized yolov9-opt, p2 configs, pgi stripping, and partial weight loading`)
   - **Repo-specific findings & notes:**
     - `YOLO.get_out_channels` used `hasattr(layer_args, "out_channels")`, which only worked on `OmegaConf.DictConfig` and failed on plain `dict`; updated to `"out_channels" in layer_args` so copied `dict` args work cleanly.
-- [ ] **Phase 3: Zero-Inference-Cost Accuracy Boosters (Training-Time Only)** (`[ ] Pending`)
+- [x] **Phase 3: Zero-Inference-Cost Accuracy Boosters (Training-Time Only)**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `yolo/tools/distillation.py` (`FrozenTeacherWrapper`, `build_teacher_model`, `KnowledgeDistillationLoss` with neck feature CWD + normalized MSE via 1x1 adapters and spatial-matched head logit/DFL KL)
+    - `scripts/prune_model.py` (MIT `torch-pruning` structured channel pruning CLI with `--pruning-ratio`, `--importance l1|taylor`, `--strip-aux`, head/chunk protection, param/MACs report, standalone checkpoint export, and recovery fine-tuning command)
+    - `yolo/config/config.py`, `yolo/config/task/train.yaml` (added `DistillConfig`, `distill`, `close_mosaic`, `multi_scale`, `multi_scale_range`, all disabled by default)
+    - `yolo/tools/loss_functions.py` (`DualLoss` handles optional `aux_predicts=None` for stripped-aux recovery fine-tuning)
+    - `yolo/tools/solver.py` (wired `KnowledgeDistillationLoss`, `close_mosaic`, `multi_scale`, standalone `pruned_model` loading in `BaseModel`, and `kd_loss.*` exclusion in `on_save_checkpoint`)
+    - `yolo/utils/model_utils.py` (`create_optimizer` accepts `extra_params` inside existing 3-group structure so `LambdaLR` warmup remains intact)
+  - **Verification command(s) & output:**
+    - Vanilla training default (`distill.enabled=false`) -> `kd_loss is None`.
+    - 2-step KD dummy batch (`v9-t-opt` student + frozen `v9-m` teacher): finite losses (`Loss/KDTotalLoss: 0.0669 -> 0.0675`), non-zero student & adapter gradients, teacher weights untouched & in `.eval()`, `on_save_checkpoint` strips `kd_loss.*`, zero teacher/adapter keys in `model.state_dict()`.
+    - Native resolutions `[480,480]`, `[512,512]`, `[640,640]` compose cleanly.
+    - `scripts/prune_model.py` (`v9-t-opt`, L1, `0.20`): `Params 2,660,910 -> 1,891,266 (-28.92%)`, `MACs 878,957,696 -> 645,962,624 (-26.51%)`; (`v9-t-opt-p2`, Taylor, `--strip-aux`, `0.20`): `Params 1,602,908 -> 1,062,472 (-33.72%)`, `MACs 859,185,088 -> 610,651,584 (-28.93%)`; both reload cleanly in `BaseModel` and pass forward inference.
+    - `.venv\Scripts\python.exe -m pytest tests/test_tools/test_loss_functions.py -p no:cacheprovider -q` -> `1 passed in 1.45s`.
+  - **Git commit hash:** `pending-phase-3-commit` (updated in Phase 4 commit)
+  - **Repo-specific findings & notes:**
+    - `yolo/utils/model_utils.py` `create_scheduler` passes 3 lambdas to `LambdaLR`, so KD projection adapters must be appended to existing `conv_params` rather than adding a 4th param group.
+    - `torch-pruning` 1.6.1 hits a `_SplitOp` index mismatch across `ELAN`/`RepNCSPELAN` `chunk(2, 1)` + `cat` unless `ELAN.conv1`, `RepNCSPELAN.conv1`, `ADown`, `CBLinear`, `DConv`, and detection heads are in `ignored_layers`; protecting those boundaries still achieves ~29–34% parameter and ~27–29% MACs reduction.
+    - For `--importance taylor`, `wrapper.zero_grad()` must run *after* `pruner.step()` (previously zeroing before `step()` cleared `.grad` tensors).
 - [ ] **Phase 4: OpenVINO Export, NNCF INT8, PrePostProcessor & Unified Detector** (`[ ] Pending`)
 - [ ] **Phase 5: Automated A/B Benchmark Suite (`scripts/benchmark_compare.py`)** (`[ ] Pending`)
 - [ ] **Phase 6: Automated Real Baseline Benchmark on COCO `val2017`** (`[ ] Pending`)

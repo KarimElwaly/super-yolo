@@ -53,3 +53,19 @@ scheduler:
 ema:
   enable: true
   decay: 0.9999
+
+# Opt-in training enhancements (all disabled by default to preserve vanilla training)
+# Native resolution overrides: `image_size=[480,480]`, `[512,512]`, or `[640,640]`
+close_mosaic: 0 # Set e.g. 15 to disable Mosaic/MixUp during final N epochs
+multi_scale: false # Set true to jitter image_size (+/-20%, multiples of 32) per epoch
+multi_scale_range: [0.8, 1.2]
+
+distill:
+  enabled: false
+  teacher_model: v9-m
+  teacher_weights: null
+  lambda_kd: 1.0
+  feature_weight: 0.5
+  logit_weight: 0.5
+  temperature: 1.0
+  feature_tags: ["P3", "P4", "P5"]

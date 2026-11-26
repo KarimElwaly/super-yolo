@@ -107,7 +107,9 @@ class GradientAccumulation(Callback):
         self.current_batch += 1
 
 
-def create_optimizer(model: YOLO, optim_cfg: OptimizerConfig) -> Optimizer:
+def create_optimizer(
+    model: YOLO, optim_cfg: OptimizerConfig, extra_params: Optional[List[torch.nn.Parameter]] = None
+) -> Optimizer:
     """Create an optimizer for the given model parameters based on the configuration.
 
     Returns:
@@ -118,6 +120,8 @@ def create_optimizer(model: YOLO, optim_cfg: OptimizerConfig) -> Optimizer:
     bias_params = [p for name, p in model.named_parameters() if "bias" in name]
     norm_params = [p for name, p in model.named_parameters() if "weight" in name and "bn" in name]
     conv_params = [p for name, p in model.named_parameters() if "weight" in name and "bn" not in name]
+    if extra_params:
+        conv_params.extend(p for p in extra_params if p.requires_grad)
 
     model_parameters = [
         {"params": bias_params, "momentum": 0.937, "weight_decay": 0},

@@ -41,15 +41,25 @@ class BoxLoss(nn.Module):
 class DFLoss(nn.Module):
     def __init__(self, vec2box: Vec2Box, reg_max: int) -> None:
         super().__init__()
+        self.vec2box = vec2box
+        self._cached_image_size = tuple(vec2box.image_size)
         self.anchors_norm = (vec2box.anchor_grid / vec2box.scaler[:, None])[None]
         self.reg_max = reg_max
+
+    def _get_anchors_norm(self) -> Tensor:
+        cur_size = tuple(self.vec2box.image_size)
+        if cur_size != self._cached_image_size or self.anchors_norm.device != self.vec2box.anchor_grid.device:
+            self.anchors_norm = (self.vec2box.anchor_grid / self.vec2box.scaler[:, None])[None]
+            self._cached_image_size = cur_size
+        return self.anchors_norm
 
     def forward(
         self, predicts_anc: Tensor, targets_bbox: Tensor, valid_masks: Tensor, box_norm: Tensor, cls_norm: Tensor
     ) -> Any:
+        anchors_norm = self._get_anchors_norm()
         valid_bbox = valid_masks[..., None].expand(-1, -1, 4)
         bbox_lt, bbox_rb = targets_bbox.chunk(2, -1)
-        targets_dist = torch.cat(((self.anchors_norm - bbox_lt), (bbox_rb - self.anchors_norm)), -1).clamp(
+        targets_dist = torch.cat(((anchors_norm - bbox_lt), (bbox_rb - anchors_norm)), -1).clamp(
             0, self.reg_max - 1.01
         )
         picked_targets = targets_dist[valid_bbox].view(-1)
@@ -121,14 +131,20 @@ class DualLoss:
         self, aux_predicts: List[Tensor], main_predicts: List[Tensor], targets: Tensor
     ) -> Tuple[Tensor, Dict[str, float]]:
         # TODO: Need Refactor this region, make it flexible!
-        aux_iou, aux_dfl, aux_cls = self.loss(aux_predicts, targets)
         main_iou, main_dfl, main_cls = self.loss(main_predicts, targets)
-
-        total_loss = [
-            self.iou_rate * (aux_iou * self.aux_rate + main_iou),
-            self.dfl_rate * (aux_dfl * self.aux_rate + main_dfl),
-            self.cls_rate * (aux_cls * self.aux_rate + main_cls),
-        ]
+        if aux_predicts is not None:
+            aux_iou, aux_dfl, aux_cls = self.loss(aux_predicts, targets)
+            total_loss = [
+                self.iou_rate * (aux_iou * self.aux_rate + main_iou),
+                self.dfl_rate * (aux_dfl * self.aux_rate + main_dfl),
+                self.cls_rate * (aux_cls * self.aux_rate + main_cls),
+            ]
+        else:
+            total_loss = [
+                self.iou_rate * main_iou,
+                self.dfl_rate * main_dfl,
+                self.cls_rate * main_cls,
+            ]
         loss_dict = {
             f"Loss/{name}Loss": value.detach().item() for name, value in zip(["Box", "DFL", "BCE"], total_loss)
         }

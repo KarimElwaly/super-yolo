@@ -128,6 +128,18 @@ class ValidationConfig:
 
 
 @dataclass
+class DistillConfig:
+    enabled: bool = False
+    teacher_model: str = "v9-m"
+    teacher_weights: Optional[str] = None
+    lambda_kd: float = 1.0
+    feature_weight: float = 0.5
+    logit_weight: float = 0.5
+    temperature: float = 1.0
+    feature_tags: Optional[List[str]] = None
+
+
+@dataclass
 class TrainConfig:
     task: str
     epoch: int
@@ -137,6 +149,10 @@ class TrainConfig:
     scheduler: SchedulerConfig
     ema: EMAConfig
     validation: ValidationConfig
+    distill: Optional[DistillConfig] = None
+    close_mosaic: int = 0
+    multi_scale: bool = False
+    multi_scale_range: Optional[List[float]] = None
 
 
 @dataclass
