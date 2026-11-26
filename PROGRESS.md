@@ -15,7 +15,7 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
     - Installed 107 packages via `uv pip install` (`torch==2.14.1+cu130`, `torchvision==0.29.1+cu130`, `openvino==2026.4.1`, `nncf==3.4.0`, `onnx==1.23.2`, `onnxsim==0.8.1`, `onnxruntime==1.32.0`, `supervision==0.32.3`, `torch-pruning==1.6.1`, `pycocotools==2.0.11`, `psutil==7.2.2`, `pip-licenses==5.5.5`, `pytest==9.2.0`, plus `requirements.txt` deps).
     - Verified imports & CUDA: `torch: 2.14.1+cu130 cuda: True NVIDIA GeForce RTX 4050 Laptop GPU`, `openvino: 2026.4.1-22982-e213a147257-releases/2026/4`, `nncf: 3.4.0`, `onnx: 1.23.2`, `ort: 1.32.0`, `sv: 0.32.3`.
     - Baseline unit tests: `tests/test_model` + `tests/test_utils` -> 37 passed in combined run; `test_vec2box_autoanchor` and `test_anc2box_autoanchor` passed (`2 passed in 3.65s`) when run cleanly without hitting Windows pagefile commit cap.
-  - **Git commit hash:** `pending-step-0-commit` (recorded after commit)
+  - **Git commit hash:** `b559a67` (`chore(step-0): configure .gitignore, .venv, and initialize PROGRESS.md`)
   - **Repo-specific findings & notes:**
     - Windows PowerShell 5.1 does not support `&&`; chain commands with `;` and check `$LASTEXITCODE`.
     - `C:` drive has ~0.9 GB free while `D:` has ~30.65 GB free; keep all downloads, `data/`, `weights/`, `exports/`, and temp artifacts on `D:\projects\YOLO\`.
@@ -27,7 +27,19 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
       - `yolo/tools/data_loader.py`: dataset cache extension is `.pache`.
       - `pip-licenses`: zero GPL/AGPL packages (`faster-coco-eval` metadata reports `UNKNOWN` in `METADATA`, verified `Apache-2.0` via `.dist-info/licenses/LICENSE`; `certifi` is `MPL-2.0`; `tqdm` is `MPL-2.0 AND MIT`).
 
-- [ ] **Phase 1: Dataset Pipeline, COCO Class Filter & License Audit** (`[ ] Pending`)
+- [x] **Phase 1: Dataset Pipeline, COCO Class Filter & License Audit**
+  - **Status:** `[x] Done`
+  - **Key files created/modified:**
+    - `scripts/check_licenses.py` (audits `.venv` distributions via `importlib.metadata` + `.dist-info` license file fallback; bans `ultralytics`/`boxmot` and flags strong `GPL`/`AGPL`)
+    - `scripts/convert_yolo_to_coco.py` (converts Ultralytics `.txt` labels + `data.yaml` to COCO JSON with `--verify` bounds/area/class validation and optional verification image rendering)
+    - `scripts/filter_coco_classes.py` (filters COCO JSON to target classes, remaps category IDs contiguously `0..K-1`, transfers images, emits Hydra dataset YAML)
+    - `yolo/config/dataset/custom_template.yaml` (documented custom dataset template)
+  - **Verification command(s) & output:**
+    - `.venv\Scripts\python.exe scripts/check_licenses.py` -> `Scanned 107 installed packages. PASSED: All 107 packages are compliant (0 GPL/AGPL, 0 banned packages).` (exit code `0`)
+    - End-to-end synthetic check: `custom_template` Hydra compose OK; `scripts/convert_yolo_to_coco.py --verify --verify-samples 1` converted and verified 2 train + 2 val images / 3 boxes per split; `scripts/filter_coco_classes.py --classes person,bus` filtered to 2 classes `[0, 1]` and loaded cleanly in `YoloDataset` (2 samples).
+  - **Git commit hash:** `pending-phase-1-commit` (updated in Phase 2 commit)
+  - **Repo-specific findings & notes:**
+    - Several scientific wheels (`cycler`, `kiwisolver`, `matplotlib`, `scipy`) embed multi-line license text in `License:` headers while `faster-coco-eval` stores Apache-2.0 text only in `.dist-info/licenses/LICENSE`; `check_licenses.py` handles `License-Expression`, full-text `License`, `Classifier`, and `dist.locate_file()` inspection.
 - [ ] **Phase 2: CPU-Optimized & High-Accuracy Architecture Upgrades (Additive)** (`[ ] Pending`)
 - [ ] **Phase 3: Zero-Inference-Cost Accuracy Boosters (Training-Time Only)** (`[ ] Pending`)
 - [ ] **Phase 4: OpenVINO Export, NNCF INT8, PrePostProcessor & Unified Detector** (`[ ] Pending`)

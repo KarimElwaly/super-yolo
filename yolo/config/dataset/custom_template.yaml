@@ -1,0 +1,25 @@
+# Custom Dataset Template for Hydra (`dataset=custom_template` or copy to `dataset=<your_name>`)
+#
+# Expected COCO-style directory layout (recommended via `scripts/convert_yolo_to_coco.py`
+# or `scripts/filter_coco_classes.py` to avoid `.txt` loader mAP bugs):
+#   <path>/
+#     images/
+#       train/   (*.jpg / *.png)
+#       val/     (*.jpg / *.png)
+#     annotations/
+#       instances_train.json
+#       instances_val.json
+#
+# Quick start:
+#   1. Copy this file to `yolo/config/dataset/my_dataset.yaml`.
+#   2. Edit ONLY `path`, `class_num`, and `class_list` below (plus `train`/`validation` if split names differ).
+#   3. Train with: `python yolo/lazy.py task=train dataset=my_dataset model=v9-t-opt`
+
+path: data/custom_dataset
+train: train
+validation: val
+
+class_num: 3
+class_list: ['pothole', 'crack', 'manhole']
+
+auto_download:
