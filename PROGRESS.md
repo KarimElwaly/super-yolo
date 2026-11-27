@@ -155,3 +155,71 @@ Environment: `.venv` (Python 3.11.9, Windows PowerShell 5.1)
   - **Git commit hash:** `eace1d2` & `16ed1ba` (followed by final verification & sync commit)
   - **Repo-specific findings & notes:**
     - All deliverables verified end-to-end on branch `feat/yolov9-cpu-upgrade` with zero modifications to vanilla `v9-t.yaml`, `v9-s.yaml`, or `v9-m.yaml`.
+- [x] **Phase 9: Runtime CPU Upgrade (Async Inference, RepConv Fusion, Calibration Hygiene)**
+  - **Status:** `[x] Done` (screening benchmark on 500 images; full 5,000-image certification pending)
+  - **Key files created/modified:**
+    - `inference/detector_ov.py` (`num_streams` -> `NUM_STREAMS`, `share_outputs=True` in `infer_raw`, `_order_raw_outputs`, max-class-score pre-filter in `postprocess`)
+    - `inference/demo_stream_count.py` (`_OrderedAsyncInference` over `ov.AsyncInferQueue` with ordered `take()`, `--async-requests` (default `4`), `--drop-stale-frames` / `--no-drop-frames` (default: process every frame), `cv2.setNumThreads(1)`)
+    - `yolo/model/module.py` (`RepConv.switch_to_deploy()` folds 3x3 + 1x1 Conv-BN branches into one conv)
+    - `scripts/export_openvino.py` (`_fuse_reparameterizable_blocks` after `strip_auxiliary_branches`, NNCF `fast_bias_correction=False`, `--calib-exclude-ann` / `--calib-exclude-first-images` to keep calibration images out of the evaluation set; meta records `fused_repconv_count`, `calibration_samples`, `calibration_excluded_images`, `fast_bias_correction`)
+    - `scripts/benchmark_compare.py` (`--async-requests` AsyncInferQueue path, FPS = timed iters / wall time, THROUGHPUT hint when async > 1, latency definition note in report)
+    - `tests/test_upgrade_smoke.py` (`test_repconv_fusion_preserves_eval_output`; e2e test uses calibration exclusion and `async_requests=2`)
+    - `docs/4_deploy/2_onnx.rst` (OpenVINO CPU deployment section)
+    - `benchmark_manifest_runtime_upgrade.yaml`, `benchmark_report_runtime_upgrade.md`, `benchmark_report_runtime_upgrade.json`
+    - Ignored exports: `exports/coco_bench/{v9t,v9s}_fused_fp16_ppp`, `exports/coco_bench/{v9t,v9s}_fused_int8_ppp_prot` (640x640, 42 RepConvs fused, 500 calibration images excluding the first 500 eval images, 37 protected ops)
+  - **Verification command(s) & output:**
+    - `.venv\Scripts\python.exe -m pytest tests/test_upgrade_smoke.py -k "repconv_fusion_preserves_eval_output or export_detector_and_benchmark_e2e" -p no:cacheprovider` -> `2 passed`. Full smoke + upstream suites **not re-run** after these changes.
+    - `benchmark_compare.py --manifest benchmark_manifest_runtime_upgrade.yaml --max-eval-images 500 --threads 4 --async-requests 4 --warmup 20 --iters 150`:
+
+      | Model | mAP50-95 | AP_small | FPS | P95 ms | CPU-s/100f | Peak RSS MB | Disk MB | Gate |
+      |---|---:|---:|---:|---:|---:|---:|---:|---|
+      | v9t-fp16 (baseline) | 41.39 | 22.92 | 29.87 | 218.27 | 14.052 | 671.7 | 4.92 | baseline |
+      | v9t-fused-fp16-ppp | 41.38 | 22.93 | 30.84 | 251.24 | 12.708 | 645.7 | 4.71 | ROLLBACK (< +25%) |
+      | v9t-fused-int8-protected | 41.00 | 22.27 | 71.15 | 103.72 | 5.479 | 669.5 | 3.49 | **PASS** |
+      | v9s-fp16 (baseline) | 50.92 | 32.59 | 10.34 | 703.01 | 38.688 | 716.7 | 14.81 | baseline |
+      | v9s-fused-fp16-ppp | 50.92 | 32.60 | 10.61 | 721.84 | 36.833 | 689.6 | 14.44 | ROLLBACK (< +25%) |
+      | v9s-fused-int8-protected | 50.66 | 31.56 | 29.81 | 252.93 | 13.188 | 670.7 | 8.43 | ROLLBACK (AP_small `-1.029 pp` vs `-1.0` gate) |
+
+    - FIFA video (`1280x720`, `1,260` frames, 25 FPS source) with `v9t_fused_int8_ppp_prot`, `--threads 4 --async-requests 4 --no-zones --output ...`: all frames processed, `42.9`–`62.5` FPS end-to-end, `10,999` detections, `214` track IDs.
+  - **Git commit hash:** `f47ec4a` (`feat: Implement RepConv module with fusion capabilities and add tests`)
+  - **Repo-specific findings & notes:**
+    - Async latency (P95 `103.72 ms`) includes queue wait and is **not** comparable with single-request latency (`33.84 ms` sync, earlier run) or with the yolo26n `17.13 ms` figure.
+    - The earlier `37.46 FPS` for `v9-t-int8-ppp-protect-heads` was sequential single-request noise; head protection costs ~0 latency (unprotected `75.5` vs protected `77.5` FPS, same CPU-s).
+    - RepConv fusion is accuracy-neutral but gives only ~1–2% speed on its own.
+    - Comparison with the user-supplied Ultralytics `yolo26n` INT8 OpenVINO row (`43.28%` mAP, `62.08` FPS, `5.305` CPU-s/100f): v9-t fused INT8 has higher async FPS (`71.15`), equal CPU-s (`5.48`), similar AP_small, but `-2.3 pp` mAP. Not apples-to-apples (different harness, image set, request mode); yolo26n not re-run locally.
+- [ ] **Phase 10: CPU Consumption Investigation & 15-Class v9-t Plan**
+  - **Status:** `[ ] Investigation done; implementation awaiting user approval`
+  - **Measurements (v9-t fused INT8, 640x640, real FIFA frames, 600 iters):**
+    - OpenVINO CPU knobs (4 streams x 1 thread, THROUGHPUT): baseline `5.03` CPU-s/100f / `78.4` FPS; `SCHEDULING_CORE_TYPE=PCORE_ONLY` `5.02`; `ENABLE_HYPER_THREADING=NO` `5.02`; `CPU_DENORMALS_OPTIMIZATION=YES` `5.03`; `TBB_PARTITIONER=STATIC` `4.98`; 2 streams `5.47`; single-request LATENCY `6.29`–`6.36`. **No knob gives a meaningful gain; inference is at its floor without model changes.**
+    - Full demo pipeline CPU-s/100f: `7.27` with tracking+drawing+MP4 write, `6.47` without writing, `6.56` without tracking. Per stage: decode (cv2 software) `0.63`, cv2 D3D11 hardware decode `0.97` (worse), letterbox `0.10`, annotation (9 detections) `0.13`, `mp4v` writing `0.52`–`0.8`.
+    - GPU offload via OpenVINO, default GPU settings (host CPU-s/100f / FPS): CPU INT8 `5.07` / `77.5`; Intel iGPU (GPU.0) INT8 `4.45` / `45.2`, FP16 `5.32` / `37.7`; NVIDIA dGPU (GPU.1) INT8 `3.08` / `60.0`, FP16 `4.02` / `48.0`. Host CPU stays high because the default GPU queue busy-waits.
+    - **`GPU_QUEUE_THROTTLE=LOW` removes the busy-wait on the Intel iGPU:**
+
+      | Device / model | Hint | FPS | Host CPU-s/100f | mAP50-95 (500 img) | mAP50 | AP_small |
+      |---|---|---:|---:|---:|---:|---:|
+      | CPU, fused INT8 protected (current) | THROUGHPUT 4x1 | 77.5 | 5.07 | 41.00 | 55.78 | 22.28 |
+      | iGPU, fused INT8 protected, throttle LOW | THROUGHPUT | 46.7 | **0.57** | 40.91 | 55.75 | 22.06 |
+      | iGPU, fused INT8 protected, throttle LOW | LATENCY (1 req) | 38.6 | 0.56 | — | — | — |
+      | **iGPU, fused FP16, throttle LOW** | THROUGHPUT | 32.6 | **0.85** | **41.34** | 56.22 | **23.01** |
+      | dGPU (NVIDIA via OpenVINO), fused INT8, throttle LOW | THROUGHPUT | 60.2 | 3.21 | — | — | — |
+      | dGPU, fused INT8, throttle LOW | LATENCY (1 req) | 54.4 | 1.76 | — | — | — |
+
+      - iGPU fused FP16 vs original CPU FP16 baseline (`41.39` / AP_small `22.92`, `14.05` CPU-s/100f): `-0.05 pp` mAP, `+0.09 pp` AP_small, **~94% less host CPU**, and still faster than the 25 FPS FIFA source.
+      - iGPU fused INT8 vs CPU fused INT8: `-0.09 pp` mAP, `-0.21 pp` AP_small, **~89% less host CPU**.
+      - `MEDIUM`/`HIGH` throttle on the iGPU keep host CPU at ~`4.2`; only `LOW` gives the drop. The NVIDIA path through OpenVINO's OpenCL plugin still costs `1.8`–`3.2` host CPU-s/100f.
+      - Not yet done: wire `device` + `GPU_QUEUE_THROTTLE` into `OpenVINODetector` / `demo_stream_count.py` / `benchmark_compare.py`, end-to-end FIFA run on the iGPU, full 5,000-image accuracy check, and iGPU power/thermal effect on laptop CPU clocks.
+    - Class-branch compute (deploy graph, aux stripped, 640x640): v9-t `4.95` GMACs at 80 classes, of which class branch `2.03` (`41%`); `3.58`–`3.60` GMACs for 1–32 classes (`-27%`), `4.18` at 48, `4.93` at 64. v9-s: `13.35` -> `13.27` GMACs (`-0.6%`), so class reduction only helps v9-t.
+    - `--classes` filtering in the demo only removes post-processing/tracking/drawing work and does not reduce model compute.
+  - **Planned target:** v9-t with 15 classes: person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, traffic light, fire hydrant, stop sign, parking meter, bench, cell phone (current output indices `0`–`13` and `67`; COCO IDs `1`–`11`, `13`–`15`, `77`). Expected `~3.59` GMACs (`-27%`), estimated `~3.8`–`4.0` inference CPU-s/100f (not yet measured).
+  - **Planned phases:**
+    1. Zero-risk 15-output slice of the final class conv (bit-identical scores, ~2% compute).
+    2. Data: download COCO `train2017` (~18 GB) to `D:`; build 15-class train/val JSON with `scripts/filter_coco_classes.py --keep-empty-images --link-mode hardlink` (hardlinks avoid a second ~18 GB copy); add `yolo/config/dataset/coco15.yaml`.
+    3. Code: replace hardcoded 80-class `IDX_TO_ID` in `yolo/utils/model_utils.py` with a config-driven mapping; add `--eval-classes` to `benchmark_compare.py`; propagate class names through export metadata/detector/demo; add tests.
+    4. Warm start: copy backbone/neck/box branch; shrink class branch 128 -> 64 channels by importance; keep final-layer rows `0`–`13`, `67`; sanity-check mAP before training.
+    5. Fine-tune on RTX 4050 (6 GB): 1-epoch pilot, then 30–60 epochs, SGD lr ~1e-3, EMA, mosaic off for the last ~10 epochs. Knowledge distillation from v9-t-80 or v9-s as fallback.
+    6. Export with fusion + protected INT8 + `fast_bias_correction=False` + calibration exclusion.
+    7. Gates on full 5,000-image val2017, 15 classes only: mAP50-95 and mAP50 `>= -0.5 pp`, AP_small `>= -1.0 pp`, per-class AP `>= -1.0 pp` (rare classes reported, not auto-failed), CPU-s/100f `>= 15%` lower, RSS not higher, FIFA visual check. Rollback to the Phase 9 model on failure.
+  - **Open decisions:** keep all negative images vs subsample; distillation from start vs fallback only; rare-class gate policy.
+  - **Repo-specific findings & notes:**
+    - Only `data/coco_val2017` is on disk; free space at investigation time: `D:` 29 GB, `C:` 19 GB.
+    - On Windows the `.venv\Scripts\python.exe` launcher spawns a child interpreter, so `Process.TotalProcessorTime` on the launcher reads ~0; measure CPU in-process with `time.process_time()`.
