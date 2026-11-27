@@ -169,20 +169,8 @@ accuracy to Phase 0 (within float noise).
    - Loss: the normal loss plus BCE between student and teacher class probabilities.
    - Optional box-distribution loss.
 
-### Phase 5 — Structured pruning with distillation (optional, after Phase 4 passes)
 
-Backbone + neck are 64% of compute, so this is the largest remaining lever.
-
-1. Use `torch-pruning` (MIT, already installed) to remove whole channels from backbone/neck convolutions.
-   - Rank channels by importance: magnitude, or a Taylor estimate of how much the loss changes without them.
-   - Linked layers (concats, residual adds, RepConv) are handled together by its dependency graph.
-2. Prune in steps: **10% → 20% → 30%** of channels, fine-tuning with distillation after each step.
-   - Student: the pruned 15-class v9-t.
-   - Teacher: v9-s or the unpruned 15-class v9-t.
-3. Stop at the largest pruning ratio that passes all gates.
-4. Keep channel counts multiples of 8 or 16, so the SIMD kernels stay efficient on all Intel CPUs.
-
-### Phase 6 — Export
+### Phase 5 — Export
 
 Same pipeline as the current production model:
 
@@ -194,7 +182,7 @@ Same pipeline as the current production model:
 
 Output goes to `exports/coco15/v9t15_<variant>_fused_int8_ppp_prot`.
 
-### Phase 7 — Acceptance gates
+### Phase 6 — Acceptance gates
 
 These are measured on the **full 5,000-image val2017** set, 15 classes only, against the Phase 0 reference.
 
@@ -212,7 +200,7 @@ If all gates pass, the new model becomes the default and the docs and demo comma
 
 If a gate fails, apply distillation. If it still fails, keep the Phase 1 model.
 
-### Phase 8 — Cross-CPU validation (different Intel CPUs)
+### Phase 7 — Cross-CPU validation (different Intel CPUs)
 
 1. Add a CPU probe to the benchmark report:
    - CPU name;
