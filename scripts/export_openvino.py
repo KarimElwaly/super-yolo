@@ -25,6 +25,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from inference.detector_ov import letterbox_bgr
+from yolo.model.module import RepConv
 from yolo.model.yolo import YOLO, create_model
 from yolo.utils.bounding_box_utils import generate_anchors
 
@@ -183,6 +184,14 @@ def inspect_onnx_no_aux(onnx_path: Path, expected_max_convs: int) -> Dict[str, A
     }
 
 
+def _fuse_reparameterizable_blocks(model: nn.Module) -> int:
+    """Fuse evaluation-mode RepConv blocks before tracing/export."""
+    blocks = [module for module in model.modules() if isinstance(module, RepConv)]
+    for block in blocks:
+        block.switch_to_deploy()
+    return len(blocks)
+
+
 def _collect_protected_head_ops(ov_model: ov.Model) -> List[str]:
     """Trace backward from model outputs to protect final Detection head Convs and decode tail."""
     protected_names: Set[str] = set()
@@ -251,12 +260,16 @@ def _load_calibration_tensors(
     calib_dir: Path,
     image_size: Tuple[int, int],
     max_samples: int,
+    excluded_filenames: Optional[Set[str]] = None,
 ) -> List[np.ndarray]:
     if not calib_dir.is_dir():
         raise FileNotFoundError(f"Calibration image directory not found: {calib_dir}")
-    img_paths = sorted(
-        p for p in calib_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )[:max_samples]
+    excluded = excluded_filenames or set()
+    img_paths = [
+        p
+        for p in sorted(p for p in calib_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
+        if p.name not in excluded
+    ][:max_samples]
     if not img_paths:
         raise FileNotFoundError(f"No calibration images found in {calib_dir}")
 
@@ -287,6 +300,8 @@ def export_pipeline(
     int8: bool = False,
     calib_dir: Optional[Path] = None,
     calib_samples: int = 250,
+    calib_exclude_ann: Optional[Path] = None,
+    calib_exclude_first_images: int = 0,
     protect_heads: bool = False,
     embed_preprocess: bool = False,
     static_preprocess: bool = False,
@@ -307,6 +322,7 @@ def export_pipeline(
     yolo_model, model_cfg, weight_source = _load_yolo_for_export(model_arg, weights_arg, class_num)
 
     strip_stats = yolo_model.strip_auxiliary_branches()
+    fused_repconv_count = _fuse_reparameterizable_blocks(yolo_model)
     strides = _infer_strides(yolo_model, model_cfg, image_size)
     wrapper = ExportYOLOWrapper(yolo_model, image_size=image_size, strides=strides).eval()
 
@@ -367,10 +383,28 @@ def export_pipeline(
     fp16_tmp_xml.with_suffix(".bin").unlink(missing_ok=True)
 
     protected_ops_count = 0
+    excluded_calib_filenames: Set[str] = set()
     if int8:
         if calib_dir is None:
             raise ValueError("--calib-dir is required when --int8 is enabled.")
-        calib_tensors = _load_calibration_tensors(calib_dir, image_size=(w, h), max_samples=calib_samples)
+        if calib_exclude_first_images < 0:
+            raise ValueError("--calib-exclude-first-images cannot be negative.")
+        if calib_exclude_first_images:
+            if calib_exclude_ann is None or not calib_exclude_ann.is_file():
+                raise ValueError("--calib-exclude-ann is required when excluding evaluation images from calibration.")
+            ann = json.loads(calib_exclude_ann.read_text(encoding="utf-8"))
+            excluded_calib_filenames = {
+                Path(str(image["file_name"])).name
+                for image in sorted(ann.get("images", []), key=lambda item: int(item["id"]))[
+                    :calib_exclude_first_images
+                ]
+            }
+        calib_tensors = _load_calibration_tensors(
+            calib_dir,
+            image_size=(w, h),
+            max_samples=calib_samples,
+            excluded_filenames=excluded_calib_filenames,
+        )
         input_name = ov_model.inputs[0].any_name
         calib_dataset = nncf.Dataset(calib_tensors, lambda item: {input_name: item})
 
@@ -386,6 +420,7 @@ def export_pipeline(
             preset=nncf.QuantizationPreset.MIXED,
             ignored_scope=ignored_scope,
             subset_size=len(calib_tensors),
+            fast_bias_correction=False,
         )
 
     dynamic_spatial = bool(embed_preprocess and not static_preprocess)
@@ -405,6 +440,10 @@ def export_pipeline(
         "dynamic_spatial": dynamic_spatial,
         "protect_heads": bool(protect_heads and int8),
         "protected_ops_count": protected_ops_count,
+        "fused_repconv_count": fused_repconv_count,
+        "calibration_samples": len(calib_tensors) if int8 else 0,
+        "calibration_excluded_images": len(excluded_calib_filenames),
+        "fast_bias_correction": False if int8 else None,
         "class_num": class_num,
         "class_names": class_names,
         "source_weights": weight_source,
@@ -456,6 +495,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--int8", action="store_true", help="Run NNCF INT8 PTQ quantization.")
     parser.add_argument("--calib-dir", type=Path, default=None, help="Calibration images directory for NNCF INT8.")
     parser.add_argument("--calib-samples", type=int, default=250, help="Number of calibration samples (default: 250).")
+    parser.add_argument("--calib-exclude-ann", type=Path, default=None, help="COCO annotation JSON used to exclude evaluation images from calibration.")
+    parser.add_argument("--calib-exclude-first-images", type=int, default=0, help="Exclude this many images ordered by COCO image ID from calibration.")
     parser.add_argument("--protect-heads", action="store_true", help="Keep detection output heads in higher precision via nncf.IgnoredScope.")
     parser.add_argument("--embed-preprocess", action="store_true", help="Fuse OpenVINO PrePostProcessor (uint8 NHWC BGR input).")
     parser.add_argument("--static-preprocess", action="store_true", help="Use fixed [1,H,W,3] input shape with PrePostProcessor instead of dynamic spatial resize.")
@@ -475,6 +516,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         int8=args.int8,
         calib_dir=args.calib_dir,
         calib_samples=args.calib_samples,
+        calib_exclude_ann=args.calib_exclude_ann,
+        calib_exclude_first_images=args.calib_exclude_first_images,
         protect_heads=args.protect_heads,
         embed_preprocess=args.embed_preprocess,
         static_preprocess=args.static_preprocess,

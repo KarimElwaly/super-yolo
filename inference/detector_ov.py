@@ -81,6 +81,7 @@ class OpenVINODetector:
         self,
         model_xml_path: Union[str, Path],
         num_threads: int = 4,
+        num_streams: int = 1,
         performance_hint: str = "LATENCY",
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
@@ -98,7 +99,12 @@ class OpenVINODetector:
         self.max_det = int(max_det)
         self.device = str(device)
         self.num_threads = int(num_threads)
+        self.num_streams = int(num_streams)
         self.performance_hint = str(performance_hint)
+        if self.num_threads < 1:
+            raise ValueError(f"num_threads must be positive, got {self.num_threads}")
+        if self.num_streams < 1:
+            raise ValueError(f"num_streams must be positive, got {self.num_streams}")
 
         self.core = ov.Core()
         ov_model = self.core.read_model(str(self.model_xml_path))
@@ -135,6 +141,7 @@ class OpenVINODetector:
         if self.device.upper().startswith("CPU"):
             compile_cfg["INFERENCE_NUM_THREADS"] = str(self.num_threads)
             compile_cfg["PERFORMANCE_HINT"] = self.performance_hint
+            compile_cfg["NUM_STREAMS"] = str(self.num_streams)
 
         self.compiled_model = self.core.compile_model(ov_model, self.device, compile_cfg)
         self.infer_request = self.compiled_model.create_infer_request()
@@ -176,8 +183,12 @@ class OpenVINODetector:
 
     def infer_raw(self, input_tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Run OpenVINO inference on an already-prepared tensor and return (boxes [B,N,4], scores [B,N,C])."""
-        outputs = self.infer_request.infer({self.input_name: input_tensor})
+        outputs = self.infer_request.infer({self.input_name: input_tensor}, share_outputs=True)
         tensors = list(outputs.values())
+        return self._order_raw_outputs(tensors)
+
+    @staticmethod
+    def _order_raw_outputs(tensors: Sequence[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         if len(tensors) != 2:
             raise RuntimeError(f"Expected 2 outputs (boxes, scores) from OpenVINO IR, got {len(tensors)}")
         # Identify boxes ([B, N, 4]) vs scores ([B, N, C]) safely even if output order varies
@@ -207,7 +218,11 @@ class OpenVINODetector:
             return sv.Detections.empty()
 
         # Vectorized multi-label confidence filtering across [N, C]
-        anchor_idx, cls_idx = np.where(b_scores >= conf_th)
+        eligible_anchor_idx = np.flatnonzero(np.max(b_scores, axis=1) >= conf_th)
+        if eligible_anchor_idx.size == 0:
+            return sv.Detections.empty()
+        local_anchor_idx, cls_idx = np.where(b_scores[eligible_anchor_idx] >= conf_th)
+        anchor_idx = eligible_anchor_idx[local_anchor_idx]
         if anchor_idx.size == 0:
             return sv.Detections.empty()
 

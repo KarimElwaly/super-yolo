@@ -11,11 +11,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from threading import Lock
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import openvino as ov
 import psutil
 import yaml
 from pycocotools.coco import COCO
@@ -199,9 +201,11 @@ def benchmark_single_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
     disk_mb = disk_bytes / (1024.0 * 1024.0)
 
     proc = psutil.Process(os.getpid())
+    cv2.setNumThreads(1)
     detector = OpenVINODetector(
         model_xml_path=xml_path,
         num_threads=int(cfg["threads"]),
+        num_streams=int(cfg.get("async_requests", 1)),
         performance_hint=str(cfg["performance_hint"]),
         conf_threshold=float(cfg["bench_conf"]),
         iou_threshold=float(cfg["bench_iou"]),
@@ -215,26 +219,78 @@ def benchmark_single_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
     speed_frames = _load_speed_frames(val_images_dir, detector.input_size)
     warmup_iters = int(cfg["warmup"])
     timed_iters = int(cfg["iters"])
+    async_requests = int(cfg.get("async_requests", 1))
+    if async_requests < 1:
+        raise ValueError(f"async_requests must be positive, got {async_requests}")
 
     peak_rss = proc.memory_info().rss
-    for i in range(warmup_iters):
-        detector.detect(speed_frames[i % len(speed_frames)])
-        if i % 10 == 0:
-            peak_rss = max(peak_rss, proc.memory_info().rss)
-
     latencies_ms: List[float] = []
-    cpu_start = proc.cpu_times()
-    wall_start = time.perf_counter()
+    if async_requests == 1:
+        for i in range(warmup_iters):
+            detector.detect(speed_frames[i % len(speed_frames)])
+            if i % 10 == 0:
+                peak_rss = max(peak_rss, proc.memory_info().rss)
 
-    for i in range(timed_iters):
-        frame = speed_frames[i % len(speed_frames)]
-        t0 = time.perf_counter()
-        detector.detect(frame)
-        latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-        if i % 25 == 0:
-            peak_rss = max(peak_rss, proc.memory_info().rss)
+        cpu_start = proc.cpu_times()
+        wall_start = time.perf_counter()
+        for i in range(timed_iters):
+            frame = speed_frames[i % len(speed_frames)]
+            t0 = time.perf_counter()
+            detector.detect(frame)
+            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+            if i % 25 == 0:
+                peak_rss = max(peak_rss, proc.memory_info().rss)
+        wall_elapsed = max(time.perf_counter() - wall_start, 1e-6)
+    else:
+        queue = ov.AsyncInferQueue(detector.compiled_model, async_requests)
+        callback_errors: List[Exception] = []
+        callback_lock = Lock()
 
-    wall_elapsed = max(time.perf_counter() - wall_start, 1e-6)
+        def finish_request(request: ov.InferRequest, userdata: Any) -> None:
+            started_at, geom, _input_tensor = userdata
+            try:
+                outputs = [
+                    request.get_output_tensor(index).data
+                    for index in range(len(detector.compiled_model.outputs))
+                ]
+                boxes, scores = detector._order_raw_outputs(outputs)
+                detector.postprocess(boxes, scores, geom)
+                latencies_ms.append((time.perf_counter() - started_at) * 1000.0)
+            except Exception as exc:
+                with callback_lock:
+                    callback_errors.append(exc)
+
+        queue.set_callback(finish_request)
+        for i in range(warmup_iters):
+            started_at = time.perf_counter()
+            tensor, geom = detector.prepare_input(speed_frames[i % len(speed_frames)])
+            queue.start_async(
+                {detector.input_name: tensor},
+                userdata=(started_at, geom, tensor),
+                share_inputs=True,
+            )
+        queue.wait_all()
+        if callback_errors:
+            raise RuntimeError("Asynchronous benchmark warmup failed.") from callback_errors[0]
+        latencies_ms.clear()
+
+        cpu_start = proc.cpu_times()
+        wall_start = time.perf_counter()
+        for i in range(timed_iters):
+            started_at = time.perf_counter()
+            tensor, geom = detector.prepare_input(speed_frames[i % len(speed_frames)])
+            queue.start_async(
+                {detector.input_name: tensor},
+                userdata=(started_at, geom, tensor),
+                share_inputs=True,
+            )
+            if i % 25 == 0:
+                peak_rss = max(peak_rss, proc.memory_info().rss)
+        queue.wait_all()
+        wall_elapsed = max(time.perf_counter() - wall_start, 1e-6)
+        if callback_errors:
+            raise RuntimeError("Asynchronous benchmark inference failed.") from callback_errors[0]
+
     cpu_end = proc.cpu_times()
     peak_rss = max(peak_rss, proc.memory_info().rss)
 
@@ -246,7 +302,7 @@ def benchmark_single_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
     lat_mean = float(np.mean(lat_arr))
     lat_p50 = float(np.percentile(lat_arr, 50))
     lat_p95 = float(np.percentile(lat_arr, 95))
-    fps = 1000.0 / max(lat_mean, 1e-6)
+    fps = timed_iters / max(wall_elapsed, 1e-6)
 
     accuracy: Dict[str, Optional[float]] = {
         "evaluated_images": 0,
@@ -279,6 +335,8 @@ def benchmark_single_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "letterbox_embedded": detector.letterbox_embedded,
         "input_size": list(detector.input_size),
         "threads": int(cfg["threads"]),
+        "async_requests": async_requests,
+        "num_streams": async_requests,
         "performance_hint": str(cfg["performance_hint"]),
         "warmup": warmup_iters,
         "iters": timed_iters,
@@ -369,10 +427,13 @@ def render_markdown_report(
         "## Locked Execution Controls",
         f"- **Baseline:** `{baseline_name}`",
         f"- **INFERENCE_NUM_THREADS:** `{controls['threads']}` | **PERFORMANCE_HINT:** `{controls['performance_hint']}`",
+        f"- **Async Requests / Streams:** `{controls['async_requests']}` / `{controls['async_requests']}`",
         f"- **Warmup / Timed Iterations:** `{controls['warmup']}` / `{controls['iters']}`",
         f"- **Max Eval Images:** `{controls['max_eval_images'] or 'ALL'}`",
         "",
         "## Model Metrics",
+        "Latency is end-to-end per submitted frame (including queue wait in throughput mode); FPS is total timed frames divided by timed wall time.",
+        "",
         "| Model | Variant | Precision | PPP | mAP@0.5:0.95 | mAP@0.5 | AP_small | AP_med | AP_large | Mean (ms) | P50 (ms) | P95 (ms) | FPS | CPU % | CPU-s/100f | Peak RSS (MB) | Disk (MB) |",
         "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
@@ -413,6 +474,7 @@ def run_benchmark_suite(
     val_ann: Optional[Path] = None,
     max_eval_images: int = 0,
     threads: int = 4,
+    async_requests: int = 1,
     performance_hint: str = "LATENCY",
     warmup: int = 50,
     iters: int = 300,
@@ -437,7 +499,8 @@ def run_benchmark_suite(
             "val_ann": str(val_ann) if val_ann else None,
             "max_eval_images": int(max_eval_images),
             "threads": int(threads),
-            "performance_hint": performance_hint,
+            "async_requests": int(async_requests),
+            "performance_hint": "THROUGHPUT" if async_requests > 1 else performance_hint,
             "warmup": int(warmup),
             "iters": int(iters),
             "bench_conf": float(bench_conf),
@@ -478,7 +541,8 @@ def run_benchmark_suite(
 
     controls = {
         "threads": int(threads),
-        "performance_hint": performance_hint,
+        "async_requests": int(async_requests),
+        "performance_hint": "THROUGHPUT" if async_requests > 1 else performance_hint,
         "warmup": int(warmup),
         "iters": int(iters),
         "max_eval_images": int(max_eval_images),
@@ -511,6 +575,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--val-ann", type=Path, default=None, help="COCO validation annotation JSON.")
     parser.add_argument("--max-eval-images", type=int, default=0, help="Max images for COCO eval (0 = all).")
     parser.add_argument("--threads", type=int, default=4, help="Locked INFERENCE_NUM_THREADS (default: 4).")
+    parser.add_argument("--async-requests", type=int, default=1, help="Concurrent OpenVINO requests (default: 1; use 4 for throughput mode).")
     parser.add_argument("--performance-hint", default="LATENCY", help="Locked PERFORMANCE_HINT (default: LATENCY).")
     parser.add_argument("--warmup", type=int, default=50, help="Warmup iterations (default: 50).")
     parser.add_argument("--iters", type=int, default=300, help="Timed iterations (default: 300).")
@@ -539,6 +604,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         val_ann=args.val_ann,
         max_eval_images=args.max_eval_images,
         threads=args.threads,
+        async_requests=args.async_requests,
         performance_hint=args.performance_hint,
         warmup=args.warmup,
         iters=args.iters,

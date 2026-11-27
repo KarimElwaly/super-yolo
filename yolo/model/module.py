@@ -234,9 +234,78 @@ class RepConv(nn.Module):
         self.act = create_activation_function(activation)
         self.conv1 = Conv(in_channels, out_channels, kernel_size, activation=False, **kwargs)
         self.conv2 = Conv(in_channels, out_channels, 1, activation=False, **kwargs)
+        self.reparam: Optional[nn.Conv2d] = None
 
     def forward(self, x: Tensor) -> Tensor:
+        if self.reparam is not None:
+            return self.act(self.reparam(x))
         return self.act(self.conv1(x) + self.conv2(x))
+
+    def switch_to_deploy(self) -> None:
+        """Fold the parallel Conv-BN branches into one equivalent convolution."""
+        if self.reparam is not None:
+            return
+        if self.training:
+            raise RuntimeError("RepConv can only be fused while in evaluation mode.")
+
+        main_conv = self.conv1.conv
+        point_conv = self.conv2.conv
+        if (
+            main_conv.groups != point_conv.groups
+            or main_conv.stride != point_conv.stride
+            or main_conv.dilation != point_conv.dilation
+        ):
+            raise ValueError("RepConv branches must have matching groups, strides, and dilations to fuse.")
+
+        def fuse_conv_bn(branch: Conv) -> Tuple[Tensor, Tensor]:
+            conv = branch.conv
+            bn = branch.bn
+            if bn.running_mean is None or bn.running_var is None:
+                raise RuntimeError("RepConv batch normalization must have running statistics to fuse.")
+            scale = (
+                bn.weight / torch.sqrt(bn.running_var + bn.eps)
+                if bn.weight is not None
+                else torch.rsqrt(bn.running_var + bn.eps)
+            )
+            bias = bn.bias if bn.bias is not None else torch.zeros_like(bn.running_mean)
+            conv_bias = conv.bias if conv.bias is not None else torch.zeros_like(bn.running_mean)
+            return conv.weight * scale.reshape(-1, 1, 1, 1), (bias + (conv_bias - bn.running_mean) * scale)
+
+        main_weight, main_bias = fuse_conv_bn(self.conv1)
+        point_weight, point_bias = fuse_conv_bn(self.conv2)
+        kernel_h, kernel_w = main_conv.kernel_size
+        if kernel_h % 2 == 0 or kernel_w % 2 == 0 or point_conv.kernel_size != (1, 1):
+            raise ValueError("RepConv fusion requires an odd main kernel and a 1x1 pointwise branch.")
+        expected_point_padding = (
+            main_conv.padding[0] - (kernel_h // 2) * main_conv.dilation[0],
+            main_conv.padding[1] - (kernel_w // 2) * main_conv.dilation[1],
+        )
+        if point_conv.padding != expected_point_padding:
+            raise ValueError("RepConv branches do not have matching output-grid alignment.")
+
+        point_weight = F.pad(
+            point_weight,
+            (kernel_w // 2, kernel_w // 2, kernel_h // 2, kernel_h // 2),
+        )
+        fused_conv = nn.Conv2d(
+            in_channels=main_conv.in_channels,
+            out_channels=main_conv.out_channels,
+            kernel_size=main_conv.kernel_size,
+            stride=main_conv.stride,
+            padding=main_conv.padding,
+            dilation=main_conv.dilation,
+            groups=main_conv.groups,
+            bias=True,
+            padding_mode=main_conv.padding_mode,
+            device=main_conv.weight.device,
+            dtype=main_conv.weight.dtype,
+        )
+        with torch.no_grad():
+            fused_conv.weight.copy_(main_weight + point_weight)
+            fused_conv.bias.copy_(main_bias + point_bias)
+        self.reparam = fused_conv
+        del self.conv1
+        del self.conv2
 
 
 class Bottleneck(nn.Module):

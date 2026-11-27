@@ -1,0 +1,20 @@
+baseline: v9t-fp16
+models:
+  - name: v9t-fp16
+    model_xml: 'exports\coco_bench\v9t_fp16\v9t_fp16.xml'
+    baseline: true
+  - name: v9t-fused-fp16-ppp
+    model_xml: 'exports\coco_bench\v9t_fused_fp16_ppp\v9t_fused_fp16_ppp.xml'
+    compare_to: v9t-fp16
+  - name: v9t-fused-int8-protected
+    model_xml: 'exports\coco_bench\v9t_fused_int8_ppp_prot\v9t_fused_int8_ppp_prot.xml'
+    compare_to: v9t-fp16
+  - name: v9s-fp16
+    model_xml: 'exports\coco_bench\v9s_fp16\v9s_fp16.xml'
+    baseline: true
+  - name: v9s-fused-fp16-ppp
+    model_xml: 'exports\coco_bench\v9s_fused_fp16_ppp\v9s_fused_fp16_ppp.xml'
+    compare_to: v9s-fp16
+  - name: v9s-fused-int8-protected
+    model_xml: 'exports\coco_bench\v9s_fused_int8_ppp_prot\v9s_fused_int8_ppp_prot.xml'
+    compare_to: v9s-fp16

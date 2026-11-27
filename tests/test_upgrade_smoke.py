@@ -33,6 +33,7 @@ from scripts.export_openvino import export_pipeline
 from scripts.filter_coco_classes import main as filter_coco_main
 from scripts.prune_model import main as prune_main
 from yolo.model.yolo import create_model, load_partial_weights, strip_auxiliary_branches
+from yolo.model.module import RepConv
 from yolo.tools.data_loader import YoloDataset
 from yolo.tools.solver import BaseModel, TrainModel
 from yolo.utils.bounding_box_utils import Vec2Box
@@ -57,6 +58,17 @@ def _cleanup(*objs) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def test_repconv_fusion_preserves_eval_output():
+    module = RepConv(8, 8, 3).eval()
+    inputs = torch.randn(1, 8, 32, 32)
+    with torch.no_grad():
+        expected = module(inputs)
+        module.switch_to_deploy()
+        actual = module(inputs)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    assert module.reparam is not None
 
 
 def test_01_license_audit_clean():
@@ -435,6 +447,8 @@ def test_08_09_10_export_detector_and_benchmark_e2e(tmp_path: Path):
         int8=True,
         calib_dir=calib_dir,
         calib_samples=4,
+        calib_exclude_ann=ann_path,
+        calib_exclude_first_images=1,
         protect_heads=True,
         embed_preprocess=True,
         static_preprocess=True,
@@ -442,6 +456,9 @@ def test_08_09_10_export_detector_and_benchmark_e2e(tmp_path: Path):
     assert res_opt["meta"]["precision"] == "INT8"
     assert res_opt["meta"]["embedded_preprocess"] is True
     assert res_opt["meta"]["protected_ops_count"] > 0
+    assert res_opt["meta"]["fused_repconv_count"] > 0
+    assert res_opt["meta"]["calibration_excluded_images"] == 1
+    assert res_opt["meta"]["calibration_samples"] == 3
 
     sample_bgr = cv2.imread(str(calib_dir / "img_0000.jpg"))
     for xml_str, exp_ppp in [(res_van["xml_path"], False), (res_opt["xml_path"], True)]:
@@ -472,6 +489,7 @@ def test_08_09_10_export_detector_and_benchmark_e2e(tmp_path: Path):
         model_xml=Path(res_opt["xml_path"]),
         source=str(vid_path),
         num_threads=2,
+        async_requests=2,
         detect_every_n=2,
         max_frames=3,
         output_video=stream_out,
@@ -495,6 +513,7 @@ def test_08_09_10_export_detector_and_benchmark_e2e(tmp_path: Path):
         val_ann=ann_path,
         max_eval_images=4,
         threads=2,
+        async_requests=2,
         warmup=2,
         iters=5,
         output_md=out_md,

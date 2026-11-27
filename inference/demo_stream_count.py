@@ -7,11 +7,12 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+import openvino as ov
 import supervision as sv
 from scipy.optimize import linear_sum_assignment
 
@@ -223,6 +224,50 @@ class ThreadedFrameGrabber:
         self.cap.release()
 
 
+class _OrderedAsyncInference:
+    """Run bounded asynchronous inference and return detections in submission order."""
+
+    def __init__(self, detector: OpenVINODetector, num_requests: int) -> None:
+        self.detector = detector
+        self.queue = ov.AsyncInferQueue(detector.compiled_model, num_requests)
+        self._condition = Condition()
+        self._completed: Dict[int, Tuple[np.ndarray, sv.Detections, Optional[Exception]]] = {}
+        self.queue.set_callback(self._on_complete)
+
+    def submit(self, frame_index: int, frame: np.ndarray) -> None:
+        input_tensor, geom = self.detector.prepare_input(frame)
+        self.queue.start_async(
+            {self.detector.input_name: input_tensor},
+            userdata=(frame_index, frame, geom, input_tensor),
+            share_inputs=True,
+        )
+
+    def _on_complete(self, request: ov.InferRequest, userdata: Any) -> None:
+        frame_index, frame, geom, _input_tensor = userdata
+        detections = sv.Detections.empty()
+        error: Optional[Exception] = None
+        try:
+            outputs = [request.get_output_tensor(i).data for i in range(len(self.detector.compiled_model.outputs))]
+            boxes, scores = self.detector._order_raw_outputs(outputs)
+            detections = self.detector.postprocess(boxes, scores, geom)
+        except Exception as exc:
+            error = exc
+        with self._condition:
+            self._completed[frame_index] = (frame, detections, error)
+            self._condition.notify_all()
+
+    def take(self, frame_index: int) -> Tuple[np.ndarray, sv.Detections]:
+        with self._condition:
+            self._condition.wait_for(lambda: frame_index in self._completed)
+            frame, detections, error = self._completed.pop(frame_index)
+        if error is not None:
+            raise RuntimeError(f"Asynchronous inference failed for frame {frame_index}") from error
+        return frame, detections
+
+    def wait_all(self) -> None:
+        self.queue.wait_all()
+
+
 def _resolve_class_filter(
     target_classes: Optional[List[str]],
     class_names: List[str],
@@ -251,21 +296,25 @@ def run_stream_pipeline(
     model_xml: Path,
     source: str,
     num_threads: int = 4,
+    async_requests: int = 4,
     conf_threshold: float = 0.25,
     iou_threshold: float = 0.45,
     detect_every_n: int = 1,
     max_frames: int = 0,
     output_video: Optional[Path] = None,
     display: bool = False,
-    drop_stale: bool = True,
+    drop_stale: bool = False,
     target_classes: Optional[List[str]] = None,
     show_zones: bool = True,
     use_tracker: bool = True,
 ) -> Dict[str, Any]:
+    if async_requests < 1:
+        raise ValueError(f"async_requests must be positive, got {async_requests}")
     detector = OpenVINODetector(
         model_xml_path=model_xml,
         num_threads=num_threads,
-        performance_hint="LATENCY",
+        num_streams=async_requests,
+        performance_hint="THROUGHPUT" if async_requests > 1 else "LATENCY",
         conf_threshold=conf_threshold,
         iou_threshold=iou_threshold,
     )
@@ -297,54 +346,75 @@ def run_stream_pipeline(
         writer = cv2.VideoWriter(str(output_video), cv2.VideoWriter_fourcc(*"mp4v"), grabber.source_fps, (w, h))
 
     frame_idx = 0
+    next_async_frame_idx = 0
+    pending_frames: List[Tuple[np.ndarray, bool]] = []
+    async_inference = _OrderedAsyncInference(detector, async_requests) if async_requests > 1 else None
     total_detections = 0
     unique_track_ids: set[int] = set()
     last_detections = sv.Detections.empty()
     t_start = time.perf_counter()
+    previous_cv_threads = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    stop_requested = False
+
+    def process_frame(frame: np.ndarray, raw_dets: Optional[sv.Detections]) -> None:
+        nonlocal last_detections, total_detections, stop_requested
+        if raw_dets is not None:
+            if allowed_ids is not None and len(raw_dets) > 0 and raw_dets.class_id is not None:
+                keep = np.isin(raw_dets.class_id, sorted(allowed_ids))
+                raw_dets = raw_dets[keep]
+            last_detections = tracker.update_with_detections(raw_dets) if tracker is not None else raw_dets
+            total_detections += len(raw_dets)
+            if last_detections.tracker_id is not None:
+                unique_track_ids.update(int(t) for t in last_detections.tracker_id.tolist())
+
+        if line_zone is not None:
+            line_zone.trigger(last_detections)
+        if poly_zone is not None:
+            poly_zone.trigger(last_detections)
+
+        annotated = box_annotator.annotate(scene=frame.copy(), detections=last_detections)
+        labels = [
+            (
+                f"#{tid} " if tracker is not None and tid != -1 else ""
+            )
+            + f"{detector.class_names[int(cid)] if 0 <= int(cid) < len(detector.class_names) else f'cls:{cid}'} {conf:.2f}"
+            for tid, cid, conf in zip(
+                last_detections.tracker_id if last_detections.tracker_id is not None else [-1] * len(last_detections),
+                last_detections.class_id if last_detections.class_id is not None else [0] * len(last_detections),
+                last_detections.confidence if last_detections.confidence is not None else [0.0] * len(last_detections),
+            )
+        ]
+        if len(last_detections) > 0:
+            annotated = label_annotator.annotate(scene=annotated, detections=last_detections, labels=labels)
+        if line_annotator is not None and line_zone is not None:
+            annotated = line_annotator.annotate(frame=annotated, line_counter=line_zone)
+        if poly_annotator is not None:
+            annotated = poly_annotator.annotate(scene=annotated)
+
+        if writer is not None:
+            writer.write(annotated)
+        if display:
+            cv2.imshow("YOLOv9 OpenVINO Stream Counter", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                stop_requested = True
 
     try:
         frame: Optional[np.ndarray] = first_frame
-        while frame is not None:
-            if frame_idx % max(1, detect_every_n) == 0:
-                raw_dets = detector.detect(frame)
-                if allowed_ids is not None and len(raw_dets) > 0 and raw_dets.class_id is not None:
-                    keep = np.isin(raw_dets.class_id, sorted(allowed_ids))
-                    raw_dets = raw_dets[keep]
-                last_detections = tracker.update_with_detections(raw_dets) if tracker is not None else raw_dets
-                total_detections += len(raw_dets)
-                if last_detections.tracker_id is not None:
-                    unique_track_ids.update(int(t) for t in last_detections.tracker_id.tolist())
-
-            if line_zone is not None:
-                line_zone.trigger(last_detections)
-            if poly_zone is not None:
-                poly_zone.trigger(last_detections)
-
-            annotated = box_annotator.annotate(scene=frame.copy(), detections=last_detections)
-            labels = [
-                (
-                    f"#{tid} " if tracker is not None and tid != -1 else ""
-                )
-                + f"{detector.class_names[int(cid)] if 0 <= int(cid) < len(detector.class_names) else f'cls:{cid}'} {conf:.2f}"
-                for tid, cid, conf in zip(
-                    last_detections.tracker_id if last_detections.tracker_id is not None else [-1] * len(last_detections),
-                    last_detections.class_id if last_detections.class_id is not None else [0] * len(last_detections),
-                    last_detections.confidence if last_detections.confidence is not None else [0.0] * len(last_detections),
-                )
-            ]
-            if len(last_detections) > 0:
-                annotated = label_annotator.annotate(scene=annotated, detections=last_detections, labels=labels)
-            if line_annotator is not None and line_zone is not None:
-                annotated = line_annotator.annotate(frame=annotated, line_counter=line_zone)
-            if poly_annotator is not None:
-                annotated = poly_annotator.annotate(scene=annotated)
-
-            if writer is not None:
-                writer.write(annotated)
-            if display:
-                cv2.imshow("YOLOv9 OpenVINO Stream Counter", annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+        while frame is not None and not stop_requested:
+            should_detect = frame_idx % max(1, detect_every_n) == 0
+            if async_inference is None:
+                process_frame(frame, detector.detect(frame) if should_detect else None)
+            else:
+                if len(pending_frames) >= async_requests:
+                    old_frame, old_detect = pending_frames.pop(0)
+                    old_result = async_inference.take(next_async_frame_idx) if old_detect else None
+                    if old_detect:
+                        next_async_frame_idx += 1
+                    process_frame(old_result[0] if old_result else old_frame, old_result[1] if old_result else None)
+                if should_detect:
+                    async_inference.submit(next_async_frame_idx + sum(1 for _, do_detect in pending_frames if do_detect), frame)
+                pending_frames.append((frame, should_detect))
 
             frame_idx += 1
             if max_frames > 0 and frame_idx >= max_frames:
@@ -352,12 +422,23 @@ def run_stream_pipeline(
             ok, frame = grabber.read(timeout_s=2.0)
             if not ok:
                 break
+        if async_inference is not None:
+            async_inference.wait_all()
+            if not stop_requested:
+                for old_frame, old_detect in pending_frames:
+                    old_result = async_inference.take(next_async_frame_idx) if old_detect else None
+                    if old_detect:
+                        next_async_frame_idx += 1
+                    process_frame(old_result[0] if old_result else old_frame, old_result[1] if old_result else None)
     finally:
+        if async_inference is not None:
+            async_inference.wait_all()
         grabber.release()
         if writer is not None:
             writer.release()
         if display:
             cv2.destroyAllWindows()
+        cv2.setNumThreads(previous_cv_threads)
 
     elapsed = max(time.perf_counter() - t_start, 1e-6)
     return {
@@ -376,6 +457,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--model-xml", type=Path, required=True, help="Path to exported OpenVINO .xml IR model.")
     parser.add_argument("--source", required=True, help="Video file path, RTSP URL, or webcam index (e.g. 0).")
     parser.add_argument("--threads", type=int, default=4, help="OpenVINO CPU inference threads (default: 4).")
+    parser.add_argument("--async-requests", type=int, default=4, help="Maximum concurrent inference requests (default: 4; use 1 for sequential inference).")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold (default: 0.25).")
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (default: 0.45).")
     parser.add_argument("--classes", nargs="+", default=None, help="Filter detections by class ID(s) or name(s), e.g. --classes 0 or --classes Person.")
@@ -383,7 +465,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0 = until stream ends).")
     parser.add_argument("--output", type=Path, default=None, help="Optional output annotated MP4 path.")
     parser.add_argument("--display", action="store_true", help="Display live OpenCV window.")
-    parser.add_argument("--no-drop-frames", action="store_true", help="Process every frame sequentially instead of dropping stale frames.")
+    frame_group = parser.add_mutually_exclusive_group()
+    frame_group.add_argument("--drop-stale-frames", action="store_true", help="Drop stale capture frames to minimize live-stream latency.")
+    frame_group.add_argument("--no-drop-frames", action="store_false", dest="drop_stale_frames", help="Process every captured frame (default).")
+    parser.set_defaults(drop_stale_frames=False)
     parser.add_argument("--no-zones", action="store_true", help="Disable LineZone (in/out line) and PolygonZone overlays.")
     parser.add_argument("--no-track", action="store_true", help="Disable ByteTrack ID tracking and render raw detections directly.")
     args = parser.parse_args(argv)
@@ -392,13 +477,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         model_xml=args.model_xml,
         source=args.source,
         num_threads=args.threads,
+        async_requests=args.async_requests,
         conf_threshold=args.conf,
         iou_threshold=args.iou,
         detect_every_n=args.detect_every_n,
         max_frames=args.max_frames,
         output_video=args.output,
         display=args.display,
-        drop_stale=not args.no_drop_frames,
+        drop_stale=args.drop_stale_frames,
         target_classes=args.classes,
         show_zones=not args.no_zones,
         use_tracker=not args.no_track,
